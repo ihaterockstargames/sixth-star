@@ -8,6 +8,7 @@ rem    run.bat nobuild      run the last build without building
 rem    run.bat check        build + load and bind the title, do not start it
 rem    run.bat pipelines    build + pre-build every pipeline once (SHADER_ARCHIVE)
 rem    run.bat doctor       check settings and dependencies only
+rem    run.bat rebar        report whether Resizable BAR is active
 rem    run.bat selftest     the launch layout on synthetic files (no title needed)
 rem    run.bat tests        the full test suite
 rem    run.bat membench ^| vkbench ^| dxr-proto ^| vkrt [args]   GPU benchmarks
@@ -38,12 +39,13 @@ if exist "%USERPROFILE%\.cargo\bin" set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
 if /i "%MODE%"=="help" goto :help
 if /i "%MODE%"=="-h" goto :help
 if /i "%MODE%"=="/?" goto :help
-for %%m in (run nobuild check pipelines doctor selftest tests membench vkbench dxr-proto vkrt) do if /i "%MODE%"=="%%m" goto :known
+for %%m in (run nobuild check pipelines doctor rebar selftest tests membench vkbench dxr-proto vkrt) do if /i "%MODE%"=="%%m" goto :known
 echo [run] unknown command "%MODE%"
 set "RC=2"
 goto :help
 
 :known
+if /i "%MODE%"=="rebar" goto :rebar
 rem ---- settings ---------------------------------------------------------------
 if not defined SIXTH_CONFIG set "SIXTH_CONFIG=%REPO%\run.config.bat"
 for %%I in ("%SIXTH_CONFIG%") do set "SIXTH_CONFIG=%%~fI"
@@ -179,6 +181,15 @@ echo(%DISPLAY_MODE%| findstr /i /r /c:"^[0-9][0-9]*x[0-9][0-9]*$" >nul || (
     set "DISPLAY_MODE=1920x1080"
 )
 set "VICTORY_DISPLAY_MODE=%DISPLAY_MODE%"
+if defined BCPACK_TABLES call :abspath BCPACK_TABLES "%BCPACK_TABLES%" "%CONFIG_DIR%"
+if defined BCPACK_TABLES (
+    if exist "%BCPACK_TABLES%" (
+        set "VICTORY_BCPACK_TABLES=%BCPACK_TABLES%"
+    ) else (
+        call :say "WARNING   BCPACK_TABLES does not exist: %BCPACK_TABLES%"
+        set "BCPACK_TABLES="
+    )
+)
 
 if "%SHADER_OPT%"=="" set "SHADER_OPT=0"
 set "VICTORY_SHADER_OPT=%SHADER_OPT%"
@@ -228,6 +239,17 @@ call :say "cache     %SHOW_CACHE%"
 call :say "data      %SHOW_DATA%"
 call :say "console   %CONSOLE%, preset %PRESET%, shader_opt %SHADER_OPT%, dred %DRED%"
 call :say "display   %DISPLAY_MODE%"
+call :say "dstorage  console HLE (CPU zlib/BCPack)"
+set "SHOW_BCPACK="
+if defined VICTORY_BCPACK_TABLES set "SHOW_BCPACK=%VICTORY_BCPACK_TABLES%"
+if not defined SHOW_BCPACK if exist "%REPO%\crates\victory-formats\src\bcpack-tables.bin" set "SHOW_BCPACK=%REPO%\crates\victory-formats\src\bcpack-tables.bin"
+if not defined SHOW_BCPACK if exist "%REPO%\target\release\bcpack-tables.bin" set "SHOW_BCPACK=%REPO%\target\release\bcpack-tables.bin"
+if defined SHOW_BCPACK (
+    call :say "bcpack    %SHOW_BCPACK%"
+) else (
+    call :say "bcpack    not found (BCPack textures fail; see README)"
+)
+if exist "%REPO%\scripts\rebar.ps1" powershell -NoProfile -ExecutionPolicy Bypass -File "%REPO%\scripts\rebar.ps1"
 if defined VICTORY_SKIP_PIPELINES call :say "skipping  %VICTORY_SKIP_PIPELINES%"
 if /i "%MODE%"=="doctor" (
     call :say "doctor    settings and dependencies look usable"
@@ -351,6 +373,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%TEE%"
 set "RC=%ERRORLEVEL%"
 exit /b 0
 
+:rebar
+powershell -NoProfile -ExecutionPolicy Bypass -File "%REPO%\scripts\rebar.ps1"
+set "RC=%ERRORLEVEL%"
+goto :end
+
 :help
 echo.
 echo  run.bat [command]
@@ -359,6 +386,7 @@ echo    nobuild        run the last build without building
 echo    check          build, load and bind the title, do not start it
 echo    pipelines      build, then pre-build every pipeline from SHADER_ARCHIVE
 echo    doctor         check the settings and dependencies only
+echo    rebar          report whether Resizable BAR is active
 echo    selftest       the launch layout on synthetic files (no title needed)
 echo    tests          the whole test suite
 echo    membench, vkbench, dxr-proto, vkrt [args]   GPU benchmarks (CSV in the log folder)

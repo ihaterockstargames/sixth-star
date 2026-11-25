@@ -115,6 +115,7 @@ This is a research project, not a finished emulator. Test reports are useful eve
 | `run.bat nobuild` | run the last build without building |
 | `run.bat check` | build, then load and link the title without starting it |
 | `run.bat doctor` | check the settings and the tools only |
+| `run.bat rebar` | report whether Resizable BAR is active, with the BIOS steps if it is off |
 | `run.bat pipelines` | pre-build every pipeline once from `SHADER_ARCHIVE` (saves stutter later) |
 | `run.bat selftest` | test the launcher on synthetic files; no title needed |
 | `run.bat tests` | the full test suite (`SIXTH_REQUIRE_GPU=1`: GPU tests must run) |
@@ -157,6 +158,7 @@ Everything except `victory-game` is platform-level and can be tested with any Xb
 | `MANIFEST` | `GAME_DIR\MicrosoftGame.config` | another manifest |
 | `CONSOLE` | `series-x` | `series-s` renders at 720p with FSR and needs `FFX_DIR` |
 | `DISPLAY_MODE` | `1920x1080` | display size reported to the title; it picks its render size from this (`2560x1440` and `3840x2160` also work) |
+| `BCPACK_TABLES` | empty | path to `bcpack-tables.bin`; empty uses the copy in `crates\victory-formats\src` or next to `victory.exe` |
 | `PRESET` | `safe` | `fast` gives lower latency but can be less stable |
 | `SKIP_PIPELINES` / `SKIP_LIST` | none | shader hashes to skip, for a driver that never finishes compiling one |
 | `DRED` | `0` | `1`: more detail when the GPU device is removed |
@@ -206,6 +208,8 @@ The test suite runs on synthetic fixtures; no title is needed.
 | The build fails at linking | Install the C++ build tools and a Windows SDK (see above). |
 | Memory grows without end while a shader compiles | Put that shader's hash in `SKIP_PIPELINES`. |
 | The GPU device is removed | Run again with `DRED=1` and keep the log. |
+| `[gpu upload heap] not measured` in `membench` | The GPU upload-heap benchmark is optional and needs Resizable BAR. Check `run.bat rebar`; if it is off, enable Above 4G Decoding and Re-Size BAR Support in the BIOS and disable CSM. |
+| BCPack textures fail or the log says the tables are missing | Put `bcpack-tables.bin` in `crates\victory-formats\src`, next to `victory.exe`, or set `BCPACK_TABLES` to its path. |
 
 Every run writes a log to `logs\`. Read the first error, not the last line: later failures are often consequences of the first one.
 
