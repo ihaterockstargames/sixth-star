@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Asset policy
+    url: https://github.com/ihaterockstargames/sixth-star/blob/main/docs/asset-policy.md
+    about: What may and may not be committed or attached.
+  - name: Architecture
+    url: https://github.com/ihaterockstargames/sixth-star/blob/main/docs/architecture.md
+    about: How the loader, HLE, GPU and shader layers fit together.
