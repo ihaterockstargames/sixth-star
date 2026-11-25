@@ -1,6 +1,6 @@
 # Sixth Star — test status
 
-Last updated: 2026-11-25 23:25 UTC
+Last updated: 2026-11-25 23:46 UTC
 Build: current main
 Binary: sixth-star.exe
 
@@ -14,8 +14,10 @@ titles. No game files are included; the user supplies their own dump.
 | Stage | In-game (stage 6): gameplay is reached; **not playable yet** |
 | Loading and menus | ~30 FPS (user-reported, approximate) |
 | Gameplay | ~5 FPS (user-reported, approximate) |
-| Stability | not measured |
-| Picture | experimental; effects may be missing |
+| Intro cutscene (2026-11-26) | ~22 FPS (21.5–23.0 in the runner's frame line, run by the user); the picture then **freezes** in the cutscene |
+| What limits it | **the CPU** (measured in the intro cutscene, see below) |
+| Stability | not measured; the intro cutscene froze in the 2026-11-26 run (user-reported) |
+| Picture | experimental: flickering, missing character textures (user-reported) |
 | Output | 1920x1080 |
 | Resizable BAR | enabled |
 | DirectStorage / BCPack | console DirectStorage HLE active; BCPack tables found |
@@ -46,17 +48,40 @@ minutes or more without a crash; that has not been reached or measured.
   little slower). `CONSOLE=series-x`, `PRESET=safe`, `SHADER_OPT=0` are the
   defaults.
 
+## Where the frame time goes (2026-11-26, intro cutscene)
+
+From the runner's own frame line and card-clock line, in a run by the user
+(build `3bc7b56`, 1080p, ReBAR on, `PRESET=safe`, `DRED=1`). Two frame lines
+and about a dozen card-clock lines, over about 15 seconds:
+
+| Measure | Value |
+|---|---|
+| Frame time | 43.6–46.5 ms (21.5–23.0 FPS) |
+| CPU preparing submissions | 26.4–27.1 ms per frame; most of it is bringing copies of title memory up to date (about 32 MB per frame) |
+| On the GPU | 10.7–12.1 ms per frame |
+| Copying back to title memory | 4.4–4.7 ms, about 7.5–7.8 MB per frame |
+| GPU busy, by the runner's count | about 23–27%; 28–32 ms of each frame the GPU is idle while the submitting thread works |
+| Draws | 97 per frame |
+| Textures picked by index | about 12,400–12,600 waiting, about 17,800 passed over as unmapped |
+
+So the frame is **CPU-bound**: one submitting thread sets the pace and the
+GPU waits for it. The CPU work is being made cheaper first (plain copies,
+fewer write-watch askings, preparing on more threads), each change behind a
+switch and measured before it becomes the default. Task Manager figures were
+not taken for this run.
+
 ## History
 
 | Date | Build | Result | Notes |
 |---|---|---|---|
 | 2026-11-26 | current main | ~30 FPS loading/menus, ~5 FPS in-game | first public record; user-reported, approximate; 1080p, ReBAR on |
+| 2026-11-26 | `3bc7b56` | intro cutscene ~22 FPS, then the picture freezes | frame line from the user's run: ~27 ms CPU preparing, ~11 ms GPU, GPU ~25% busy (CPU-bound); flickering and missing character textures; start-up is slow (all user-reported) |
 
 ## Notes
 
 - No game files are included or linked.
 - The test title is not named in this repository.
-- What limits the frame rate is not measured yet. The runner's frame line
-  (logged every few seconds) splits each frame into time spent preparing
-  submissions on the CPU and time on the GPU; that split is the next
-  measurement.
+- The runner's frame line (logged every few seconds) splits each frame into
+  time spent preparing submissions on the CPU and time on the GPU. In the
+  intro cutscene the CPU side is more than twice the GPU side; see "Where the
+  frame time goes".
