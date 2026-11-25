@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/brand/banner.svg" alt="Sixth Star — a Windows compatibility layer for Xbox Series X|S titles" width="100%">
+  <img src="docs/brand/banner.svg?v=2" alt="Sixth Star — a Windows compatibility layer for Xbox Series X|S titles" width="100%">
 </p>
 
 <p align="center">
