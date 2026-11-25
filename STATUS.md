@@ -1,6 +1,6 @@
 # Sixth Star — test status
 
-Last updated: 2026-11-25 23:46 UTC
+Last updated: 2026-11-26
 Build: current main
 Binary: sixth-star.exe
 
@@ -13,9 +13,9 @@ titles. No game files are included; the user supplies their own dump.
 |---|---|
 | Stage | In-game (stage 6): gameplay is reached; **not playable yet** |
 | Loading and menus | ~30 FPS (user-reported, approximate) |
-| Gameplay | ~5 FPS (user-reported, approximate) |
+| Gameplay | ~4.6 FPS: 217.9 ms/frame in the runner's frame line (user-reported, 2026-11-26) |
 | Intro cutscene (2026-11-26) | ~22 FPS (21.5–23.0 in the runner's frame line, run by the user); the picture then **freezes** in the cutscene |
-| What limits it | **the CPU** (measured in the intro cutscene, see below) |
+| What limits it | in gameplay, **the serial path**: CPU preparing, waiting for the GPU and copying back follow one another (see below); in the intro cutscene, the CPU |
 | Stability | not measured; the intro cutscene froze in the 2026-11-26 run (user-reported) |
 | Picture | experimental: flickering, missing character textures (user-reported) |
 | Output | 1920x1080 |
@@ -48,6 +48,25 @@ minutes or more without a crash; that has not been reached or measured.
   little slower). `CONSOLE=series-x`, `PRESET=safe`, `SHADER_OPT=0` are the
   defaults.
 
+## Where the frame time goes (2026-11-26, gameplay)
+
+From the runner's frame line, user-reported:
+
+| Measure | ms per frame |
+|---|---|
+| Frame time | 217.9 (~4.6 FPS) |
+| CPU preparing submissions | 82.3 |
+| Waiting for the GPU ("on the GPU") | 86.6 |
+| Copying back to title memory | 44.7 |
+
+The three add up to 213.6 of 217.9 ms: they run one after another, with no
+overlap. "On the GPU" is the wall time from handing the lists to the queue
+until the fence is reached, so it also holds our own uploads and compares on
+the card and the gaps between submissions; how much of it is the title's own
+rendering is not measured yet (per-pass GPU timestamps are the next
+measurement). Removing the CPU parts alone would not reach the 25 ms
+(40 FPS) target; the GPU part must be taken apart as well.
+
 ## Where the frame time goes (2026-11-26, intro cutscene)
 
 From the runner's own frame line and card-clock line, in a run by the user
@@ -75,6 +94,7 @@ not taken for this run.
 | Date | Build | Result | Notes |
 |---|---|---|---|
 | 2026-11-26 | current main | ~30 FPS loading/menus, ~5 FPS in-game | first public record; user-reported, approximate; 1080p, ReBAR on |
+| 2026-11-26 | current main (build not recorded) | gameplay ~4.6 FPS (217.9 ms/frame) | frame line, user-reported: 82.3 ms CPU preparing, 86.6 ms waiting for the GPU, 44.7 ms copying back, in series |
 | 2026-11-26 | `3bc7b56` | intro cutscene ~22 FPS, then the picture freezes | frame line from the user's run: ~27 ms CPU preparing, ~11 ms GPU, GPU ~25% busy (CPU-bound); flickering and missing character textures; start-up is slow (all user-reported) |
 
 ## Notes
