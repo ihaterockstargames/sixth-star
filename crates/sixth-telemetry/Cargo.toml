@@ -1,0 +1,11 @@
+[package]
+name = "sixth-telemetry"
+description = "Gen 2 (ADR 0001): the event log every later memory, scheduling and ray-tracing decision is measured from."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

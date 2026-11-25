@@ -1,0 +1,10 @@
+[package]
+name = "vkrt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Gen 2 research: dxr-proto's scenes, rays and fp64 reference on Vulkan ray query (VK_KHR_acceleration_structure + VK_KHR_ray_query). No game data."
+
+[dependencies]
+ash = "0.38.0"

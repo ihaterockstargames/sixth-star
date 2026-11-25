@@ -1,0 +1,10 @@
+[package]
+name = "vkbench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Gen 2 research: the membench workloads on Vulkan (descriptor, buffer device address, BDA + page table, sparse). No game data."
+
+[dependencies]
+ash = "0.38.0"
