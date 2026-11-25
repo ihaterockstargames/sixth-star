@@ -87,7 +87,7 @@ pub fn dump_stacks() {
     }
     // SAFETY: we opened it.
     unsafe { CloseHandle(snapshot) };
-    eprintln!("VIctory: stacks of {} threads", ids.len());
+    eprintln!("Sixth Star: stacks of {} threads", ids.len());
     for id in ids {
         // SAFETY: opens a thread of our own process.
         let thread = unsafe {

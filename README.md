@@ -105,7 +105,7 @@ This is a research project, not a finished emulator. Test reports are useful eve
    The first start builds Sixth Star, which takes a few minutes. Later starts rebuild only what changed. Every run writes a log to `logs\`, and the console window stays open at the end so you can read what happened.
 
 > [!NOTE]
-> **Texture tables (BCPack).** Many titles store textures with BCPack compression. Decoding it needs the format's constant tables, which are not our work and so are **not** in this repository. If you have `bcpack-tables.bin`, put it in `crates\victory-formats\src\` (git ignores it there) or next to `target\release\victory.exe`, or set `VICTORY_BCPACK_TABLES` to its path. It is read when the title starts, so no rebuild is needed. Without the tables everything else still works, and the log says when a texture needed them.
+> **Texture tables (BCPack).** Many titles store textures with BCPack compression. Decoding it needs the format's constant tables, which are not our work and so are **not** in this repository. If you have `bcpack-tables.bin`, put it in `crates\victory-formats\src\` (git ignores it there) or next to `target\release\sixth-star.exe`, or set `BCPACK_TABLES` in `run.config.bat` to its path. It is read when the title starts, so no rebuild is needed. Without the tables everything else still works, and the log says when a texture needed them.
 
 ## Commands
 
@@ -158,7 +158,7 @@ Everything except `victory-game` is platform-level and can be tested with any Xb
 | `MANIFEST` | `GAME_DIR\MicrosoftGame.config` | another manifest |
 | `CONSOLE` | `series-x` | `series-s` renders at 720p with FSR and needs `FFX_DIR` |
 | `DISPLAY_MODE` | `1920x1080` | display size reported to the title; it picks its render size from this (`2560x1440` and `3840x2160` also work) |
-| `BCPACK_TABLES` | empty | path to `bcpack-tables.bin`; empty uses the copy in `crates\victory-formats\src` or next to `victory.exe` |
+| `BCPACK_TABLES` | empty | path to `bcpack-tables.bin`; empty uses the copy in `crates\victory-formats\src` or next to `sixth-star.exe` |
 | `PRESET` | `safe` | `fast` gives lower latency but can be less stable |
 | `SKIP_PIPELINES` / `SKIP_LIST` | none | shader hashes to skip, for a driver that never finishes compiling one |
 | `DRED` | `0` | `1`: more detail when the GPU device is removed |
@@ -182,10 +182,10 @@ The runner keeps four things apart:
 At startup it prints all four, so a wrong path shows up immediately. The same can be done by hand:
 
 ```powershell
-target\release\victory.exe run --package D:\Dumps\MyTitle D:\Dumps\MyTitle\bin\MyTitle.exe
+target\release\sixth-star.exe run --package D:\Dumps\MyTitle D:\Dumps\MyTitle\bin\MyTitle.exe
 ```
 
-That loads and links the title but does not start it; add `--execute` to start it. `victory.exe run --help` lists the other options.
+That loads and links the title but does not start it; add `--execute` to start it. `sixth-star.exe run --help` lists the other options.
 
 ## Testing
 
@@ -209,7 +209,7 @@ The test suite runs on synthetic fixtures; no title is needed.
 | Memory grows without end while a shader compiles | Put that shader's hash in `SKIP_PIPELINES`. |
 | The GPU device is removed | Run again with `DRED=1` and keep the log. |
 | `[gpu upload heap] not measured` in `membench` | The GPU upload-heap benchmark is optional and needs Resizable BAR. Check `run.bat rebar`; if it is off, enable Above 4G Decoding and Re-Size BAR Support in the BIOS and disable CSM. |
-| BCPack textures fail or the log says the tables are missing | Put `bcpack-tables.bin` in `crates\victory-formats\src`, next to `victory.exe`, or set `BCPACK_TABLES` to its path. |
+| BCPack textures fail or the log says the tables are missing | Put `bcpack-tables.bin` in `crates\victory-formats\src`, next to `sixth-star.exe`, or set `BCPACK_TABLES` to its path. |
 
 Every run writes a log to `logs\`. Read the first error, not the last line: later failures are often consequences of the first one.
 

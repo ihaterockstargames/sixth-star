@@ -124,7 +124,7 @@ impl Tables {
     /// The format's tables, from the user's `bcpack-tables.bin` ([`Tables::file`]).
     pub fn builtin() -> Result<Tables, Error> {
         let bytes = Tables::file().ok_or(Error(
-            "no tables: put bcpack-tables.bin next to victory.exe or in \
+            "no tables: put bcpack-tables.bin next to sixth-star.exe or in \
              crates/victory-formats/src, or name it in VICTORY_BCPACK_TABLES \
              (docs/asset-policy.md)",
         ))?;

@@ -35,7 +35,7 @@ codes, per-format dictionaries). A BCPack stream cannot be decoded without
 exactly these tables and they cannot be derived. They are part of the
 format, not our work, and the repository's licence does not cover them, so
 Sixth Star does **not** publish them: `.gitignore` keeps the file out of git.
-Users who have the file put it there or next to `victory.exe`, or name it in
+Users who have the file put it there or next to `sixth-star.exe`, or name it in
 `VICTORY_BCPACK_TABLES`; it is read at run time, so no rebuild is needed.
 Without it everything builds and runs, and decoding a BCPack stream fails
 with a message that says so. The policy check exempts the file only so that a working copy with it

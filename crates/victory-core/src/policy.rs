@@ -20,7 +20,7 @@ fn compiled_workspace_root() -> PathBuf {
 #[derive(Debug, thiserror::Error)]
 pub enum PolicyError {
     #[error(
-        "refusing to use {path} for game-derived data: it is inside the VIctory source tree \
+        "refusing to use {path} for game-derived data: it is inside the Sixth Star source tree \
          ({root}). Keep game files, caches and outputs outside the repository \
          (see docs/asset-policy.md)"
     )]
@@ -32,7 +32,7 @@ pub enum PolicyError {
     },
 }
 
-/// Returns `Ok` only if `path` is outside every VIctory source tree.
+/// Returns `Ok` only if `path` is outside every Sixth Star source tree.
 ///
 /// `path` does not have to exist yet. Two checks are made:
 /// 1. it is not below the source tree this binary was built from;

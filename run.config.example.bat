@@ -32,7 +32,7 @@ rem 3840x2160. The title picks its render size from this.
 set "DISPLAY_MODE=1920x1080"
 
 rem Optional: path to bcpack-tables.bin, needed for BCPack textures. Leave
-rem empty to use the copy in crates\victory-formats\src or next to victory.exe.
+rem empty to use the copy in crates\victory-formats\src or next to sixth-star.exe.
 set "BCPACK_TABLES="
 
 rem safe (default) or fast (lower latency; can be less stable on some GPUs).

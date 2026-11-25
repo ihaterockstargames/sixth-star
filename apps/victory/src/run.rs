@@ -186,7 +186,7 @@ fn upscaler_override(image: &victory_loader::LoadedImage) {
     let (rva, kind) = spec.split_once(',').unwrap_or((&spec, "7"));
     let rva = usize::from_str_radix(rva.trim().trim_start_matches("0x"), 16);
     let (Ok(rva), Ok(kind)) = (rva, kind.trim().parse::<u32>()) else {
-        eprintln!("VIctory: VICTORY_UPSCALER={spec}: expected <hex rva>[,<kind>]");
+        eprintln!("Sixth Star: VICTORY_UPSCALER={spec}: expected <hex rva>[,<kind>]");
         return;
     };
     let base = image.base();
@@ -209,7 +209,7 @@ fn upscaler_override(image: &victory_loader::LoadedImage) {
     }
     if calls == 0 || rva + 6 > image.info().size_of_image as usize {
         eprintln!(
-            "VIctory: upscaler picker at title+{rva:#x} not patched: no direct call to it (wrong rva?)"
+            "Sixth Star: upscaler picker at title+{rva:#x} not patched: no direct call to it (wrong rva?)"
         );
         return;
     }
@@ -224,7 +224,7 @@ fn upscaler_override(image: &victory_loader::LoadedImage) {
         at.copy_from_nonoverlapping(stub.as_ptr(), stub.len());
         VirtualProtect(at.cast(), stub.len(), old, &mut old);
     }
-    eprintln!("VIctory: upscaler picker at title+{rva:#x} returns {kind} ({calls} direct calls)");
+    eprintln!("Sixth Star: upscaler picker at title+{rva:#x} returns {kind} ({calls} direct calls)");
 }
 
 /// Debugging aid: `VICTORY_FFX_SCALE=<scale>[,<hex rva>]` sets the render
@@ -249,11 +249,11 @@ fn ffx_scale(image: &victory_loader::LoadedImage) {
         .filter(|s| *s > 0.0 && *s <= 1.0);
     let rva = usize::from_str_radix(rva.trim().trim_start_matches("0x"), 16).ok();
     let (Some(scale), Some(rva)) = (scale, rva) else {
-        eprintln!("VIctory: VICTORY_FFX_SCALE={spec}: expected <scale in (0, 1]>[,<hex rva>]");
+        eprintln!("Sixth Star: VICTORY_FFX_SCALE={spec}: expected <scale in (0, 1]>[,<hex rva>]");
         return;
     };
     if rva + FFX_SCALE_SPAN > image.info().size_of_image as usize {
-        eprintln!("VIctory: VICTORY_FFX_SCALE: title+{rva:#x} is outside the image");
+        eprintln!("Sixth Star: VICTORY_FFX_SCALE: title+{rva:#x} is outside the image");
         return;
     }
     let at = (image.base() + rva) as *mut u8;
@@ -267,10 +267,10 @@ fn ffx_scale(image: &victory_loader::LoadedImage) {
         patched
     };
     if patched {
-        eprintln!("VIctory: FidelityFX render scale at title+{rva:#x} set to {scale}");
+        eprintln!("Sixth Star: FidelityFX render scale at title+{rva:#x} set to {scale}");
     } else {
         eprintln!(
-            "VIctory: FidelityFX scale not patched: unexpected code at title+{rva:#x} (wrong rva?)"
+            "Sixth Star: FidelityFX scale not patched: unexpected code at title+{rva:#x} (wrong rva?)"
         );
     }
 }
@@ -320,7 +320,7 @@ fn watch(base: usize, size: usize) {
                 // SAFETY: four bytes inside the mapped image, checked above.
                 let value = unsafe { ((base + rva) as *const u32).read_volatile() };
                 if *seen != Some(value) {
-                    eprintln!("VIctory: title+{rva:#x} = {value:#x}");
+                    eprintln!("Sixth Star: title+{rva:#x} = {value:#x}");
                     *seen = Some(value);
                 }
             }

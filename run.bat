@@ -25,7 +25,7 @@ rem ===========================================================================
 
 set "REPO=%~dp0"
 set "REPO=%REPO:~0,-1%"
-set "BIN=%REPO%\target\release\victory.exe"
+set "BIN=%REPO%\target\release\sixth-star.exe"
 set "TEE=%REPO%\scripts\tee-run.ps1"
 set "MODE=%~1"
 if "%MODE%"=="" set "MODE=run"

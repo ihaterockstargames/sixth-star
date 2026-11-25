@@ -1,7 +1,7 @@
 //! The runner's launch layout end to end, on synthetic files only: the
 //! stand-in title from `tests/fixtures/hle-probe` (built from this
 //! repository), a separate package folder with a manifest we write, and the
-//! `victory run` binary itself, without `--execute`. No game data.
+//! `sixth-star run` binary itself, without `--execute`. No game data.
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};
@@ -36,9 +36,9 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-/// `victory run` with its caches and data kept in `root`, from `cwd`.
+/// `sixth-star run` with its caches and data kept in `root`, from `cwd`.
 fn victory(root: &Path, cwd: &Path, args: &[&str]) -> (i32, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_victory"))
+    let out = Command::new(env!("CARGO_BIN_EXE_sixth-star"))
         .arg("run")
         .args(args)
         .current_dir(cwd)

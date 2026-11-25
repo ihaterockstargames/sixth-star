@@ -768,7 +768,7 @@ pub fn save_and_reopen_pipeline_cache() {
     library::save_and_reopen();
 }
 
-/// The pre-build (`victory translate --cache --pipelines`): a title
+/// The pre-build (`sixth-star translate --cache --pipelines`): a title
 /// pipeline made ahead of a run into the pipeline library
 /// (`use_pipeline_cache`), by the code a run makes it with, so the run
 /// loads it from there under the same name (upstream 9c58a1c).

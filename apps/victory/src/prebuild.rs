@@ -1,4 +1,4 @@
-//! The pipeline pre-build (`victory translate --cache --pipelines`): every
+//! The pipeline pre-build (`sixth-star translate --cache --pipelines`): every
 //! pipeline of the title's shader pack made ahead of a run into the shader
 //! cache and host pipeline library the run reads (`<cache>/shaders`,
 //! `<cache>/pipelines`), so that a run compiles nothing the pack lists.
