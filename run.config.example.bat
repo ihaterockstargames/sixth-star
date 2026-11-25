@@ -27,6 +27,10 @@ set "CONSOLE=series-x"
 rem Only for series-s: the FidelityFX SDK's ...\Kits\FidelityFX\signedbin.
 set "FFX_DIR="
 
+rem Display size reported to the title: 1920x1080 (default), 2560x1440 or
+rem 3840x2160. The title picks its render size from this.
+set "DISPLAY_MODE=1920x1080"
+
 rem safe (default) or fast (lower latency; can be less stable on some GPUs).
 set "PRESET=safe"
 

@@ -173,6 +173,13 @@ if not exist "%FFX_DIR%\" (
 set "VICTORY_FFX_DIR=%FFX_DIR%"
 :console_ok
 
+if "%DISPLAY_MODE%"=="" set "DISPLAY_MODE=1920x1080"
+echo(%DISPLAY_MODE%| findstr /i /r /c:"^[0-9][0-9]*x[0-9][0-9]*$" >nul || (
+    call :say "WARNING   DISPLAY_MODE must be WxH, not %DISPLAY_MODE%; using 1920x1080"
+    set "DISPLAY_MODE=1920x1080"
+)
+set "VICTORY_DISPLAY_MODE=%DISPLAY_MODE%"
+
 if "%SHADER_OPT%"=="" set "SHADER_OPT=0"
 set "VICTORY_SHADER_OPT=%SHADER_OPT%"
 if "%DRED%"=="1" set "VICTORY_D3D12_DRED=1"
@@ -220,6 +227,7 @@ if not exist "%SHOW_DATA%\" (
 call :say "cache     %SHOW_CACHE%"
 call :say "data      %SHOW_DATA%"
 call :say "console   %CONSOLE%, preset %PRESET%, shader_opt %SHADER_OPT%, dred %DRED%"
+call :say "display   %DISPLAY_MODE%"
 if defined VICTORY_SKIP_PIPELINES call :say "skipping  %VICTORY_SKIP_PIPELINES%"
 if /i "%MODE%"=="doctor" (
     call :say "doctor    settings and dependencies look usable"

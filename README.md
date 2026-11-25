@@ -156,6 +156,7 @@ Everything except `victory-game` is platform-level and can be tested with any Xb
 | `WORK_DIR` | `GAME_DIR` | the title's working directory |
 | `MANIFEST` | `GAME_DIR\MicrosoftGame.config` | another manifest |
 | `CONSOLE` | `series-x` | `series-s` renders at 720p with FSR and needs `FFX_DIR` |
+| `DISPLAY_MODE` | `1920x1080` | display size reported to the title; it picks its render size from this (`2560x1440` and `3840x2160` also work) |
 | `PRESET` | `safe` | `fast` gives lower latency but can be less stable |
 | `SKIP_PIPELINES` / `SKIP_LIST` | none | shader hashes to skip, for a driver that never finishes compiling one |
 | `DRED` | `0` | `1`: more detail when the GPU device is removed |

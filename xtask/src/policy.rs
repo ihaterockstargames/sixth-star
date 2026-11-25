@@ -14,8 +14,8 @@ const MAX_FILE_SIZE: usize = 512 * 1024;
 const MAX_ENCODED_RUN: usize = 512;
 
 const ALLOWED_EXTENSIONS: &[&str] = &[
-    "rs", "toml", "md", "txt", "lock", "yml", "yaml", "json", "hlsl", "hlsli", "ps1", "cmd", "bat", "sh",
-    "svg",
+    "rs", "toml", "md", "txt", "lock", "yml", "yaml", "json", "hlsl", "hlsli", "ps1", "cmd", "bat",
+    "sh", "svg",
 ];
 const ALLOWED_NAMES: &[&str] = &[
     ".gitignore",
@@ -197,11 +197,13 @@ mod tests {
         assert!(check("crates/x/src/lib.rs", b"fn main() {}\n").is_empty());
         assert!(check(".gitignore", b"/target/\n").is_empty());
         assert!(check(".githooks/pre-commit", b"#!/bin/sh\n").is_empty());
-        assert!(check(
-            "docs/brand/logo.svg",
-            br#"<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1v1z"/></svg>"#
-        )
-        .is_empty());
+        assert!(
+            check(
+                "docs/brand/logo.svg",
+                br#"<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1v1z"/></svg>"#
+            )
+            .is_empty()
+        );
     }
 
     #[test]
