@@ -33,7 +33,7 @@ Sixth Star is a Windows compatibility layer for Xbox Series X|S titles built wit
 ## How it fits together
 
 ```mermaid
-flowchart LR
+flowchart TD
     DUMP["Your dump<br/>(outside this repo)"] --> LOADER["victory-loader"]
     LOADER --> CODE["Title x86-64 code"]
     CODE --> HLE["victory-hle<br/>console APIs"]
