@@ -22,8 +22,7 @@
   <rect width="256" height="256" rx="56" fill="url(#bg)"/>
   <circle cx="128" cy="128" r="92" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="2"/>
   <g filter="url(#glow)">
-    <path d="M128 36 L210 178 H46 Z" fill="url(#star)" fill-opacity="0.16" stroke="url(#star)" stroke-width="7" stroke-linejoin="round"/>
-    <path d="M128 220 L46 78 H210 Z" fill="url(#star)" fill-opacity="0.16" stroke="url(#star)" stroke-width="7" stroke-linejoin="round"/>
+    <polygon points="128,36 147,95 208,82 166,128 208,174 147,161 128,220 109,161 48,174 90,128 48,82 109,95" fill="url(#star)" fill-opacity="0.16" stroke="url(#star)" stroke-width="7" stroke-linejoin="round"/>
   </g>
   <circle cx="128" cy="128" r="12" fill="#E0F2FE"/>
 </svg>

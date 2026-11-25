@@ -34,13 +34,12 @@ Sixth Star is a Windows compatibility layer for Xbox Series X|S titles built wit
 
 ```mermaid
 flowchart LR
-    DUMP["Your dump<br/>(outside this repo)"] --> LOADER["victory-loader<br/>maps the PE image"]
+    DUMP["Your dump<br/>(outside this repo)"] --> LOADER["victory-loader"]
     LOADER --> CODE["Title x86-64 code"]
     CODE --> HLE["victory-hle<br/>console APIs"]
     CODE --> GPU["victory-gpu<br/>D3D12.X"]
-    CODE --> SHADER["victory-shader<br/>Xbox shaders → DXIL"]
-    SHADER <--> CACHE[("Shader cache")]
-    HLE --> HOST["Windows APIs<br/>files · saves · input"]
+    CODE --> SHADER["victory-shader<br/>Xbox → DXIL"]
+    HLE --> HOST["Windows APIs"]
     GPU --> D3D12["Desktop D3D12 / DXR"]
     SHADER --> D3D12
 ```

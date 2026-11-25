@@ -41,8 +41,7 @@
     <circle cx="1210" cy="76" r="1.5" fill="#60A5FA" fill-opacity="0.5"/>
     <g transform="translate(96 80) scale(0.625)" filter="url(#glow)">
       <circle cx="128" cy="128" r="92" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="3"/>
-      <path d="M128 36 L210 178 H46 Z" fill="url(#star)" fill-opacity="0.16" stroke="url(#star)" stroke-width="9" stroke-linejoin="round"/>
-      <path d="M128 220 L46 78 H210 Z" fill="url(#star)" fill-opacity="0.16" stroke="url(#star)" stroke-width="9" stroke-linejoin="round"/>
+      <polygon points="128,36 147,95 208,82 166,128 208,174 147,161 128,220 109,161 48,174 90,128 48,82 109,95" fill="url(#star)" fill-opacity="0.16" stroke="url(#star)" stroke-width="9" stroke-linejoin="round"/>
       <circle cx="128" cy="128" r="12" fill="#E0F2FE"/>
     </g>
     <text x="300" y="140" fill="#F8FAFC" font-family="ui-sans-serif, 'Segoe UI', Arial, sans-serif" font-size="66" font-weight="800" letter-spacing="3">SIXTH STAR</text>
