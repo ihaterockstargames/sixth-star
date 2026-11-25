@@ -29,10 +29,16 @@ const ALLOWED_NAMES: &[&str] = &[
 ];
 
 /// Paths explicitly exempted, with a reason. Keep this empty if at all possible.
-const EXCEPTIONS: &[(&str, &str)] = &[(
-    "crates/victory-formats/src/bcpack-tables.bin",
-    "the BCPack format's constant tables, when a user puts them in a working copy: ignored by git and never published (docs/asset-policy.md)",
-)];
+const EXCEPTIONS: &[(&str, &str)] = &[
+    (
+        "crates/victory-formats/src/bcpack-tables.bin",
+        "the BCPack format's constant tables, when a user puts them in a working copy: ignored by git and never published (docs/asset-policy.md)",
+    ),
+    (
+        "docs/brand/hero.jpg",
+        "Sixth Star's own branding artwork supplied by the project owner; no game content",
+    ),
+];
 
 /// Signatures of formats that must never be committed.
 const FORBIDDEN_MAGIC: &[(&[u8], &str)] = &[

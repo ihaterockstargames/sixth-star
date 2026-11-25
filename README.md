@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/brand/hero.svg" alt="Sixth Star — a Windows compatibility layer for Xbox Series X|S titles" width="100%">
+  <img src="docs/brand/hero.jpg" alt="Sixth Star — a Windows compatibility layer for Xbox Series X|S titles" width="100%">
 </p>
 
 <p align="center">
@@ -34,11 +34,11 @@ Sixth Star is a Windows compatibility layer for Xbox Series X|S titles built wit
 
 ```mermaid
 flowchart TD
-    DUMP["Your dump<br/>(outside this repo)"] --> LOADER["victory-loader"]
+    DUMP["Your dump<br/>(outside this repo)"] --> LOADER["Sixth Star loader"]
     LOADER --> CODE["Title x86-64 code"]
-    CODE --> HLE["victory-hle<br/>console APIs"]
-    CODE --> GPU["victory-gpu<br/>D3D12.X"]
-    CODE --> SHADER["victory-shader<br/>Xbox → DXIL"]
+    CODE --> HLE["Console API layer"]
+    CODE --> GPU["D3D12 layer"]
+    CODE --> SHADER["Shader translator<br/>Xbox → DXIL"]
     HLE --> HOST["Windows APIs"]
     GPU --> D3D12["Desktop D3D12 / DXR"]
     SHADER --> D3D12
@@ -51,9 +51,9 @@ The title is loaded as a normal Windows PE image. Every import is resolved in th
 | Area | State | What that means |
 |---|---|---|
 | Loader and PE mapping | ✅ Implemented | Maps the title, binds imports, handles static TLS, and reports faults as `module+rva`. |
-| Console APIs (`victory-hle`) | 🟡 Broad, incomplete | Kernel, files, `xgameruntime`; online services answer as an offline console. Title-specific gaps remain. |
-| Shader translation (`victory-shader`) | 🟡 Experimental | Xbox shader containers → DXIL, descriptor tracing, content-addressed cache. Unsupported instructions are listed by `victory translate`. |
-| D3D12.X → desktop D3D12 (`victory-gpu`) | 🟡 Experimental | Command lists, memory and pipelines; some title-specific behaviour is still missing. |
+| Console APIs | 🟡 Broad, incomplete | Kernel, files, `xgameruntime`; online services answer as an offline console. Title-specific gaps remain. |
+| Shader translation | 🟡 Experimental | Xbox shader containers → DXIL, descriptor tracing, content-addressed cache. Unsupported instructions are listed by the translator. |
+| D3D12.X → desktop D3D12 | 🟡 Experimental | Command lists, memory and pipelines; some title-specific behaviour is still missing. |
 | DXR | 🟡 Prototype | `apps/dxr-proto` explores ray tracing; not yet a complete title path. |
 | Stability and performance | 🔴 Expect issues | Crashes, missing effects and low frame rates are expected. |
 
@@ -141,7 +141,7 @@ This is a research project, not a finished emulator. Test reports are useful eve
 | `xtask` | asset-policy check and git hooks |
 | `tests/fixtures/hle-probe` | a stand-in "title" (our own code) for loader tests |
 
-Everything except `victory-game` is platform-level and can be tested with any Xbox Series title.
+Everything except `victory-game` is platform-level and can be tested with any Xbox Series title. The `victory-*` names are internal crate names inherited from the upstream VIctory fork; the product is Sixth Star.
 
 ## Settings
 

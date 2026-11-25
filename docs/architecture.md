@@ -1,5 +1,8 @@
 # Architecture
 
+The `victory-*` names below are internal crate names inherited from the
+upstream VIctory fork; the product is Sixth Star.
+
 ```
  user's files (outside repo)             VIctory
  ───────────────────────────             ─────────────────────────────────────────
