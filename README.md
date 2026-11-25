@@ -57,6 +57,8 @@ The title is loaded as a normal Windows PE image. Every import is resolved in th
 | DXR | 🟡 Prototype | `apps/dxr-proto` explores ray tracing; not yet a complete title path. |
 | Stability and performance | 🔴 Expect issues | Crashes, missing effects and low frame rates are expected. |
 
+Test report: [STATUS.md](STATUS.md) — machine, settings and measured frame rates.
+
 This is a research project, not a finished emulator. Test reports are useful even when they are negative: include the GPU, driver, Windows version and the relevant log lines.
 
 ## What you need
