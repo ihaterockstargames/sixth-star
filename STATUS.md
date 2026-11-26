@@ -198,6 +198,12 @@ Task Manager figures were not taken for this run.
     with hot copies under the late wait and the relay, and 1,500 frames
     of the game-shaped frame: no device lost, the host's memory alive
     flat (or shrinking as old copies are let go), every byte checked.
+- The scenarios above also ran in a diagnostics build under the D3D12
+  debug layer, and some under GPU-based validation
+  (`VICTORY_D3D12_DEBUG=1`, `VICTORY_D3D12_GBV=1`): no errors reported
+  (`ae0e444`). An AMD run on another machine lost the device with the
+  late wait and card copies; that is not explained by an API error these
+  checks find, and it is not tested on AMD here.
 - Texture promotion (default on) waits two frames after the new copy's
   upload before a descriptor slot shows it (`94f5b63`): a list recorded
   earlier and submitted later could otherwise have sampled it unfilled.
