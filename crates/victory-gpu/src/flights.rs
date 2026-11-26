@@ -561,6 +561,7 @@ fn frame_bench() {
             ],
         ),
     ];
+    let mut cpu_lines = Vec::new();
     println!("| switches | ms/frame | preparing | on the GPU | copying back | copies on the card |");
     println!("|---|---|---|---|---|---|");
     for (name, vars) in configs {
@@ -585,10 +586,17 @@ fn frame_bench() {
         }
         let out = child.output().expect("the child ran");
         let text = String::from_utf8_lossy(&out.stdout).to_string();
+        if let Some((_, cpu)) = text.lines().find_map(|l| l.split_once("FRAME-CPU ")) {
+            cpu_lines.push(format!("{name}: {cpu}"));
+        }
         match text.lines().find_map(|l| l.split_once("FRAME-ROW ")) {
             Some((_, row)) => println!("| {name} | {row} |"),
             None => println!("| {name} | failed: {} |", String::from_utf8_lossy(&out.stderr).lines().filter(|l| l.contains("panicked") || l.contains("failure")).collect::<Vec<_>>().join(" ")),
         }
+    }
+    println!();
+    for line in cpu_lines {
+        println!("{line}");
     }
 }
 
@@ -618,7 +626,7 @@ fn frame_child() {
              }";
         let write = "cbuffer c : register(b0) { uint stride; uint frame; uint threads; }; ByteAddressBuffer t : register(t0); RWByteAddressBuffer o : register(u0);
              [numthreads(256, 1, 1)] void main(uint3 id : SV_DispatchThreadID) {
-                 if (id.x < threads) { o.Store(id.x * stride, id.x ^ frame); }
+                 if (id.x < threads) { o.Store(id.x * stride, (id.x + 1) * (frame + 1)); }
              }";
         let params = [
             D3D12_ROOT_PARAMETER {
@@ -682,11 +690,20 @@ fn frame_child() {
     let reads: Vec<(This, u64, usize)> = (0..READ).map(|_| make(MIB4, 0)).collect();
     let mut writes: Vec<(This, u64, usize)> = (0..SMALL).map(|_| make(MIB4, 4)).collect();
     writes.extend((0..BIG).map(|_| make(MIB16, 4)));
-    // Shaders write one dword every 200 KiB: 2% of the 4 KiB pages.
-    let stride = 200u32 << 10;
+    // Shaders write 2% of each buffer: one dense block from its start (as
+    // shader output is), or with `SIXTH_BENCH_SPARSE=1` one dword every
+    // 200 KiB.
+    let sparse = std::env::var_os("SIXTH_BENCH_SPARSE").is_some();
+    let stride = if sparse { 200u32 << 10 } else { 4 };
     let mut held: std::collections::VecDeque<crate::host::HostList> = std::collections::VecDeque::new();
     let (mut times, mut split) = (Vec::new(), [0u64; 3]);
     for f in 0..FRAMES {
+        if f == FRAMES - COUNTED {
+            // The CPU time by kind from here (`crate::cpuprof`), and the
+            // bytes refreshes copied.
+            let _ = crate::cpuprof::take();
+            crate::host::PREPARING[1].store(0, std::sync::atomic::Ordering::Relaxed);
+        }
         crate::shadow::test_hot(hot, Some(400_000 + f));
         // The title's writes: 2% of the read buffers' pages.
         for (i, b) in reads.iter().enumerate() {
@@ -725,7 +742,7 @@ fn frame_child() {
             copy.refresh(&list, b.1, b.2 as u64);
             list.buffer_state(&copy.buffer, crate::host::BUFFER_WRITE);
             copy.gpu_writes(&list, b.1, b.2 as u64);
-            let threads = b.2 as u32 / stride;
+            let threads = if sparse { b.2 as u32 / stride } else { b.2 as u32 / 50 / 4 };
             // SAFETY: as above.
             unsafe {
                 list.list.SetComputeRoot32BitConstants(0, 3, [stride, f as u32, threads].as_ptr().cast(), 0);
@@ -762,7 +779,7 @@ fn frame_child() {
     for b in &writes {
         // SAFETY: inside the buffer's own memory.
         let got = unsafe { ((b.1 as usize + stride as usize) as *const u32).read() };
-        assert_eq!(got, 1 ^ last, "a shader write came back");
+        assert_eq!(got, 2 * (last + 1), "a shader write came back");
     }
     times.sort_by(f64::total_cmp);
     let carded = reads
@@ -771,6 +788,13 @@ fn frame_child() {
         .filter(|b| crate::shadow::find(b.1, 256).is_some_and(|c| c.carded()))
         .count();
     let per = |us: u64| us as f64 / 1e3 / COUNTED as f64;
+    if let Some(cpu) = crate::cpuprof::line(COUNTED as f64) {
+        let refreshed = crate::host::PREPARING[1].load(std::sync::atomic::Ordering::Relaxed) as f64 / COUNTED as f64 / f64::from(1u32 << 20);
+        println!(
+            "FRAME-CPU {cpu}; refreshes copied {refreshed:.1} MiB a frame; pages noted current after copy-back {}",
+            crate::shadow::BACK_NOTED.load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
     println!(
         "FRAME-ROW {:.1} | {:.1} | {:.1} | {:.1} | {carded} of {}",
         times[times.len() / 2],

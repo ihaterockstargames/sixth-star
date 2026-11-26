@@ -389,6 +389,19 @@ const HOT_FRAMES: u64 = 8;
 /// The most bytes of copies moved to the card in one frame.
 const HOT_BYTES_PER_FRAME: u64 = 64 << 20;
 
+/// Whether a copy-back notes the pages it wrote whole as current for the
+/// copy they came from ([`Shadow::noted`]); `VICTORY_BACK_NOTE=0` leaves
+/// them to be copied again by the next refresh, as before.
+fn back_note() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_BACK_NOTE").is_none_or(|v| v != "0"))
+}
+
+/// Since the start: pages a copy-back wrote that were noted current for
+/// the copy it came from, instead of being copied again
+/// ([`Shadow::noted`]).
+pub(crate) static BACK_NOTED: AtomicU64 = AtomicU64::new(0);
+
 /// Since the start: windows moved to the card once hot and their bytes;
 /// title-buffer copies likewise and their bytes; slots made again from a
 /// moved copy; twins let go; shader writes declared for a copy that has a
@@ -2229,8 +2242,15 @@ impl Shadow {
             for &(at, n) in &differing {
                 self.changed(at, at + n);
             }
+            // The title's writes so far in the pages about to be written
+            // back, from the write watch (`None` for memory it does not
+            // watch): see `noted` below.
+            let span = differing.first().zip(differing.last()).map(|(a, b)| (start + a.0, start + b.0 + b.1));
+            let before_ours = span.filter(|_| back_note()).and_then(|(lo, hi)| crate::watch::writes(lo, hi, false));
+            let mut merged_spans: Vec<(usize, usize)> = Vec::new();
             let mut title = vec![0u8; PIECE];
             for (at, n) in differing {
+                let piece = (start + at, start + at + n);
                 // SAFETY: inside the mapping; only the submitting thread
                 // writes it.
                 let host = unsafe { std::slice::from_raw_parts_mut(self.data.add(at), n) };
@@ -2268,16 +2288,57 @@ impl Shadow {
                     crate::host::write_mapped((start + at) as *mut u8, title.as_ptr(), n);
                     written += n;
                 }
+                // The copy holds the title's bytes over the whole piece now:
+                // between the first and last byte the GPU changed they were
+                // merged; around them the GPU changed nothing, and the piece
+                // lies in a range declared written, which the title does not
+                // write while the submission runs.
+                merged_spans.push(piece);
             }
             // Our write shows as a title write at the copy's next refresh,
-            // which copies those pages once more (some dozens of MB a
-            // frame). Asking about the whole range here, to note them
-            // current, cost more: 19-31 askings a frame over 110-174 MB of
-            // view memory, each a walk of its guards.
+            // which copied those pages once more: 121 of the 141 MiB a
+            // frame refreshes copied in `frame_bench`. Asking the write
+            // watch again now takes our write in; a page our write covered
+            // whole, and which the copy held as current before it (no
+            // title write since its last copy), is noted current at this
+            // asking. Other copies of the same memory still find the page
+            // written in the journal. Only for write-watched memory, and
+            // only the pages written back: asking about whole ranges of
+            // view memory, each a walk of its guards, cost more than the
+            // copies it saved.
+            if let (Some((lo, hi)), Some((_, before))) = (span, before_ours.as_ref())
+                && let Some((now, _)) = crate::watch::writes(lo, hi, false)
+            {
+                self.noted(&merged_spans, before, now);
+            }
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::BackSyncUs, syncing.elapsed().as_micros() as u64);
         }
         written
+    }
+
+    /// After a copy-back: the watch's pages (64 KiB) that lie whole in
+    /// `spans` (title addresses whose bytes the copy and title memory now
+    /// share) are current at asking `now`, if the copy held them as current
+    /// before (`before`: the pages' last writes until just before the copy
+    /// was written back).
+    fn noted(&self, spans: &[(usize, usize)], before: &[(usize, u64)], now: u64) {
+        let base = self.start as usize / PAGE;
+        let mut copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
+        let mut noted = 0u64;
+        for &(from, to) in spans {
+            for page in from.div_ceil(PAGE)..to / PAGE {
+                let Some(at) = page.checked_sub(base).and_then(|i| copied.get_mut(i)) else {
+                    continue;
+                };
+                let last = before.binary_search_by_key(&page, |&(p, _)| p).map_or(0, |i| before[i].1);
+                if *at != 0 && last <= *at {
+                    *at = now;
+                    noted += 1;
+                }
+            }
+        }
+        BACK_NOTED.fetch_add(noted, Ordering::Relaxed);
     }
 
     /// Offsets `[from, to)` of the copy are compared with the snapshot: for
@@ -3776,4 +3837,28 @@ mod hot_window_tests {
         TEST_HOT.with(|h| h.set(None));
         TEST_FRAME.with(|f| f.set(None));
     }
+
+    /// After a copy-back, a page of the watch is noted current for the copy
+    /// only if the written-back pieces hold it whole and no title write
+    /// came after the copy's last copy of it; a page never copied stays so.
+    #[test]
+    fn a_copy_back_notes_current_only_whole_pages_the_copy_held() {
+        use super::PAGE;
+        if host().is_none() {
+            return; // no host GPU here
+        }
+        let memory: &'static [u8] = Vec::leak(vec![0u8; 6 * PAGE]);
+        let at = (memory.as_ptr() as u64).next_multiple_of(PAGE as u64);
+        let copy = super::buffer_copy_made(at, 4 * PAGE as u64, None).expect("a copy");
+        let base = at as usize / PAGE;
+        *copy.copied.lock().unwrap() = vec![5, 5, 9, 0];
+        // The title's last writes before the copy-back: page 0 before the
+        // copy's last copy, page 1 after it, page 2 at it, page 3 never.
+        let before = [(base, 3), (base + 1, 7), (base + 2, 9)];
+        // Pieces written back: pages 0 to 3 whole but the last half of 3.
+        let spans = [(at as usize, at as usize + 2 * PAGE), (at as usize + 2 * PAGE, at as usize + 3 * PAGE + PAGE / 2)];
+        copy.noted(&spans, &before, 20);
+        assert_eq!(*copy.copied.lock().unwrap(), vec![20, 5, 20, 0]);
+    }
 }
+
