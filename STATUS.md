@@ -13,11 +13,11 @@ titles. No game files are included; the user supplies their own dump.
 |---|---|
 | Stage | In-game (stage 6): gameplay is reached; **not playable yet** |
 | Loading and menus | ~30 FPS (user-reported, approximate) |
-| Gameplay | ~4.6 FPS: 217.9 ms/frame in the runner's frame line (user-reported, 2026-11-26) |
-| Intro cutscene (2026-11-26) | ~22 FPS (21.5–23.0 in the runner's frame line, run by the user); the picture then **freezes** in the cutscene |
+| Gameplay | ~4.6 FPS: 217.9 ms/frame (measured by the maintainer from the runner's frame line on 2026-11-26) |
+| Intro cutscene | ~22 FPS: 21.5–23.0 (measured by the maintainer from the runner's frame line on 2026-11-26); the picture then **freezes** in the cutscene |
 | What limits it | in gameplay, **the serial path**: CPU preparing, waiting for the GPU and copying back follow one another (see below); in the intro cutscene, the CPU |
-| Stability | not measured; the intro cutscene froze in the 2026-11-26 run (user-reported) |
-| Picture | experimental: flickering, missing character textures (user-reported) |
+| Stability | not measured; the intro cutscene froze in the 2026-11-26 run (observed by the maintainer) |
+| Picture | experimental: flickering, missing character textures (observed by the maintainer) |
 | Output | 1920x1080 |
 | Resizable BAR | enabled |
 | DirectStorage / BCPack | console DirectStorage HLE active; BCPack tables found |
@@ -50,7 +50,7 @@ minutes or more without a crash; that has not been reached or measured.
 
 ## Where the frame time goes (2026-11-26, gameplay)
 
-From the runner's frame line, user-reported:
+Gameplay, measured by the maintainer from the runner's frame line on 2026-11-26:
 
 | Measure | ms per frame |
 |---|---|
@@ -69,7 +69,8 @@ measurement). Removing the CPU parts alone would not reach the 25 ms
 
 ## Where the frame time goes (2026-11-26, intro cutscene)
 
-From the runner's own frame line and card-clock line, in a run by the user
+Intro cutscene, measured by the maintainer from the runner's frame line and
+card-clock line on 2026-11-26
 (build `3bc7b56`, 1080p, ReBAR on, `PRESET=safe`, `DRED=1`). Two frame lines
 and about a dozen card-clock lines, over about 15 seconds:
 
@@ -94,12 +95,15 @@ not taken for this run.
 | Date | Build | Result | Notes |
 |---|---|---|---|
 | 2026-11-26 | current main | ~30 FPS loading/menus, ~5 FPS in-game | first public record; user-reported, approximate; 1080p, ReBAR on |
-| 2026-11-26 | current main (build not recorded) | gameplay ~4.6 FPS (217.9 ms/frame) | frame line, user-reported: 82.3 ms CPU preparing, 86.6 ms waiting for the GPU, 44.7 ms copying back, in series |
-| 2026-11-26 | `3bc7b56` | intro cutscene ~22 FPS, then the picture freezes | frame line from the user's run: ~27 ms CPU preparing, ~11 ms GPU, GPU ~25% busy (CPU-bound); flickering and missing character textures; start-up is slow (all user-reported) |
+| 2026-11-26 | current main (build not recorded) | gameplay ~4.6 FPS (217.9 ms/frame) | measured by the maintainer from the runner's frame line on 2026-11-26: 82.3 ms CPU preparing, 86.6 ms waiting for the GPU, 44.7 ms copying back, in series |
+| 2026-11-26 | `3bc7b56` | intro cutscene ~22 FPS, then the picture freezes | measured by the maintainer from the runner's frame line on 2026-11-26: ~27 ms CPU preparing, ~11 ms GPU, GPU ~25% busy (CPU-bound); flickering, missing character textures and a slow start-up observed by the maintainer |
 
 ## Notes
 
 - No game files are included or linked.
+- In the 2026-11-26 runs a local pipeline skip list was active (a debugging
+  aid kept outside the repository): the intro frame line shows 1 draw or
+  dispatch per frame not run. Later measurements say whether it was on.
 - The test title is not named in this repository.
 - The runner's frame line (logged every few seconds) splits each frame into
   time spent preparing submissions on the CPU and time on the GPU. In the
