@@ -915,6 +915,9 @@ fn late_child() {
     let (sent_before, _) = crate::host::late_counts();
     let mut sent_counted = 0;
     for f in 0..FRAMES {
+        if f == FRAMES - COUNTED {
+            let _ = crate::cpuprof::take();
+        }
         crate::shadow::test_hot(hot, Some(500_000 + f));
         let _ = crate::host::take_submission_us();
         let (sent0, _) = crate::host::late_counts();
@@ -965,6 +968,9 @@ fn late_child() {
     let _ = sent_before;
     times.sort_by(f64::total_cmp);
     let per = |us: u64| us as f64 / 1e3 / COUNTED as f64;
+    if let Some(cpu) = crate::cpuprof::line(COUNTED as f64) {
+        println!("LATE-CPU {cpu}");
+    }
     println!(
         "LATE-ROW {:.1} | {:.1} | {:.1} | {:.1} a frame",
         times[times.len() / 2],
