@@ -804,3 +804,172 @@ fn frame_child() {
         reads.len() + writes.len()
     );
 }
+
+/// Synthetic: submissions in flight, through the title's own queue: eight
+/// submissions a frame, each copying eight read-only 4 MiB title buffers
+/// into title textures (GPU work in the host, reading the buffers' host
+/// copies after their refresh), the title rewriting 25% of the buffers'
+/// pages before each submission, and the frame ending in a wait for the
+/// title's fence, as a frame's end does. Each mode in a child process (the
+/// switches are read once). Run with
+/// `cargo test -p victory-gpu --release --lib late_bench -- --ignored --nocapture`.
+#[test]
+#[ignore = "a benchmark (about a minute)"]
+fn late_bench() {
+    if crate::host::host().is_none() {
+        return;
+    }
+    let exe = std::env::current_exe().expect("the test binary");
+    let modes: [(&str, &[(&str, &str)]); 6] = [
+        ("synchronous", &[]),
+        ("late wait 1", &[("VICTORY_LATE_WAIT", "1")]),
+        ("late wait 3", &[("VICTORY_LATE_WAIT", "3")]),
+        ("relay 1", &[("VICTORY_RELAY", "1")]),
+        ("relay 2", &[("VICTORY_RELAY", "2")]),
+        ("relay 1 + hot 1024", &[("VICTORY_RELAY", "1"), ("SIXTH_BENCH_HOT_MB", "1024")]),
+    ];
+    println!("| mode | ms/frame | preparing | on the GPU | submissions sent ahead |");
+    println!("|---|---|---|---|---|");
+    for (name, vars) in modes {
+        let mut child = std::process::Command::new(&exe);
+        child
+            .args(["--exact", "flights::late_child", "--ignored", "--nocapture", "--test-threads", "1"])
+            .env("SIXTH_LATE_CHILD", "1")
+            .env_remove("VICTORY_LATE_WAIT")
+            .env_remove("VICTORY_RELAY")
+            .env_remove("SIXTH_BENCH_HOT_MB");
+        for (k, v) in vars {
+            child.env(k, v);
+        }
+        let out = child.output().expect("the child ran");
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        match text.lines().find_map(|l| l.split_once("LATE-ROW ")) {
+            Some((_, row)) => println!("| {name} | {row} |"),
+            None => println!(
+                "| {name} | failed: {} |",
+                String::from_utf8_lossy(&out.stderr).lines().filter(|l| l.contains("panicked") || l.contains("failure")).collect::<Vec<_>>().join(" ")
+            ),
+        }
+    }
+}
+
+/// [`late_bench`]'s frames, in a child process.
+#[test]
+#[ignore = "run by late_bench in a child process"]
+fn late_child() {
+    if std::env::var_os("SIXTH_LATE_CHILD").is_none() || crate::host::host().is_none() {
+        return;
+    }
+    #[repr(C)]
+    struct Footprint {
+        offset: u64,
+        format: u32,
+        width: u32,
+        height: u32,
+        depth: u32,
+        row_pitch: u32,
+    }
+    #[repr(C)]
+    struct Location {
+        resource: This,
+        kind: u32,
+        footprint: Footprint,
+    }
+    type CopyTexture = extern "system" fn(This, *const Location, u32, u32, u32, *const Location, *const u8);
+    const SIDE: u32 = 1024;
+    const LEN: usize = (SIDE * SIDE * 4) as usize;
+    const PER: usize = 8;
+    const SUBMISSIONS: usize = 8;
+    const FRAMES: u64 = 30;
+    const COUNTED: u64 = 10;
+    let hot = std::env::var("SIXTH_BENCH_HOT_MB").ok().and_then(|v| v.parse::<u64>().ok());
+    let null = std::ptr::null();
+    let queue_iid = iid(0x0ec870a6, 0x5d7e, 0x4c22, [0x8c, 0xfc, 0x5b, 0xaa, 0xe0, 0x76, 0x16, 0xed]);
+    let fence_iid = iid(0x0a753dcf, 0xc4d8, 0x4b91, [0xad, 0xf6, 0xbe, 0x5a, 0x60, 0xd9, 0x5a, 0x76]);
+    let mut queue = null;
+    let desc = [0u32; 4];
+    assert_eq!(crate::queue::create(null, desc.as_ptr().cast(), &queue_iid, &mut queue), 0);
+    let mut fence = null;
+    assert_eq!(crate::fence::create(null, 0, 0, &fence_iid, &mut fence), 0);
+    let count = PER * SUBMISSIONS;
+    // SAFETY: a fresh write-watched reservation of our own, never freed.
+    let region = unsafe {
+        windows_sys::Win32::System::Memory::VirtualAlloc(
+            std::ptr::null(),
+            count * LEN,
+            windows_sys::Win32::System::Memory::MEM_RESERVE | windows_sys::Win32::System::Memory::MEM_COMMIT | 0x20_0000,
+            windows_sys::Win32::System::Memory::PAGE_READWRITE,
+        )
+    } as u64;
+    assert_ne!(region, 0);
+    let buffers: Vec<(This, u64)> = (0..count as u64)
+        .map(|i| {
+            let at = region + i * LEN as u64;
+            (crate::resource::tests::title_buffer_at(at, LEN as u64), at)
+        })
+        .collect();
+    let textures: Vec<This> = (0..count).map(|_| crate::resource::tests::title_texture(SIDE, SIDE)).collect();
+    let pages = LEN / crate::watch::PAGE;
+    let (mut times, mut split) = (Vec::new(), [0u64; 2]);
+    let mut value = 0u64;
+    let (sent_before, _) = crate::host::late_counts();
+    let mut sent_counted = 0;
+    for f in 0..FRAMES {
+        crate::shadow::test_hot(hot, Some(500_000 + f));
+        let _ = crate::host::take_submission_us();
+        let (sent0, _) = crate::host::late_counts();
+        let began = std::time::Instant::now();
+        for s in 0..SUBMISSIONS {
+            // The title's writes before this submission: 25% of the pages
+            // of the buffers it copies.
+            for (i, b) in buffers.iter().enumerate().skip(s * PER).take(PER) {
+                for page in 0..pages {
+                    if (page * 131 + i * 17 + f as usize * 7).is_multiple_of(4) {
+                        // SAFETY: inside the buffer's own memory.
+                        unsafe { ((b.1 as usize + page * crate::watch::PAGE) as *mut u8).write(f as u8) };
+                    }
+                }
+            }
+            let list = new_list();
+            for i in s * PER..(s + 1) * PER {
+                let rows = Footprint { offset: 0, format: 28, width: SIDE, height: SIDE, depth: 1, row_pitch: SIDE * 4 };
+                let to = Location { resource: textures[i], kind: 0, footprint: Footprint { offset: 0, ..rows } };
+                let from = Location { resource: buffers[i].0, kind: 1, footprint: rows };
+                // SAFETY: CopyTextureRegion of a title list.
+                (unsafe { method::<CopyTexture>(list, 0x80) })(list, &to, 0, 0, 0, &from, null.cast());
+            }
+            // SAFETY: Close of a title list, ExecuteCommandLists of a title queue.
+            unsafe {
+                method::<Close>(list, 0x48)(list);
+                method::<Execute>(queue, 0x50)(queue, 1, &list);
+            }
+        }
+        value += 1;
+        // SAFETY: Signal of a title queue.
+        assert_eq!((unsafe { method::<Signal>(queue, 0x70) })(queue, fence, value), 0);
+        let waited = std::time::Instant::now();
+        while crate::fence::completed(fence) < value {
+            assert!(waited.elapsed().as_secs() < 30, "the fence never reached {value}");
+            std::thread::yield_now();
+        }
+        let took = began.elapsed().as_secs_f64() * 1e3;
+        let us = crate::host::take_submission_us();
+        if f >= FRAMES - COUNTED {
+            times.push(took);
+            split[0] += us[0];
+            split[1] += us[1];
+            sent_counted += crate::host::late_counts().0 - sent0;
+        }
+    }
+    assert_eq!(crate::descriptor::host::device_removed(), None);
+    let _ = sent_before;
+    times.sort_by(f64::total_cmp);
+    let per = |us: u64| us as f64 / 1e3 / COUNTED as f64;
+    println!(
+        "LATE-ROW {:.1} | {:.1} | {:.1} | {:.1} a frame",
+        times[times.len() / 2],
+        per(split[0]),
+        per(split[1]),
+        sent_counted as f64 / COUNTED as f64
+    );
+}

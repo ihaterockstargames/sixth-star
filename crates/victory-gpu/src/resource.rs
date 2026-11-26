@@ -2944,6 +2944,19 @@ pub(crate) mod tests {
         out
     }
 
+    /// A title texture of `width` by `height` RGBA8, one mip, made in the
+    /// state a copy writes it in.
+    pub(crate) fn title_texture(width: u32, height: u32) -> This {
+        const COPY_DEST: u32 = 0x400;
+        let mut out = std::ptr::null();
+        let desc = texture(u64::from(width), height, 28, 1);
+        assert_eq!(
+            create_committed(std::ptr::null(), &PROPERTIES, 0, &desc, COPY_DEST, std::ptr::null(), &RESOURCE_IIDS[0], &mut out),
+            S_OK
+        );
+        out
+    }
+
     /// The tests that give up copies in the PC's memory (any test's), one
     /// at a time.
     pub(crate) static PROMOTE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
