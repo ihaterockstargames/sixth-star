@@ -1762,12 +1762,21 @@ impl State {
                 continue;
             }
             // A slot that shows a copy in the PC's memory given up for one on
-            // the card (`resource::promote`) is made again from the new one.
-            if host.shows_stale(index, resource)
-                && let Some(handle) = heap.handle(index)
-            {
-                host.remake(index, handle);
-                crate::residency::SLOTS_REMADE.fetch_add(1, Ordering::Relaxed);
+            // the card (`resource::promote`) is made again from the new one,
+            // once that one's upload has run (`resource::settled`): a list
+            // recorded before this pass and submitted after it reads the
+            // slot too. Until then the slot shows the old copy, which it
+            // holds, and stays in the queue.
+            let mut revisit = false;
+            if host.shows_stale(index, resource) {
+                if crate::resource::settled(resource)
+                    && let Some(handle) = heap.handle(index)
+                {
+                    host.remake(index, handle);
+                    crate::residency::SLOTS_REMADE.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    revisit = true;
+                }
             }
             // A texture that has a staging buffer now is one draws read
             // through a table: they upload it, and check it at every
@@ -1808,7 +1817,11 @@ impl State {
                 // next draw that reads the texture through a table stage,
                 // detile and upload all of it once more.
                 HEAP_TEXTURES_TABLED.fetch_add(1, Ordering::Relaxed);
-                host.texture_slot_done(index, write, again);
+                if revisit {
+                    host.texture_slot_later(index, write, frame, 2);
+                } else {
+                    host.texture_slot_done(index, write, again);
+                }
                 continue;
             }
             // Uploaded: the list holds the staging buffer until it has run;
@@ -1825,6 +1838,10 @@ impl State {
             SPENT.fetch_add(bytes, Ordering::Relaxed);
             HEAP_TEXTURE_BYTES.fetch_add(bytes, Ordering::Relaxed);
             HEAP_TEXTURES.fetch_add(1, Ordering::Relaxed);
+            if revisit {
+                host.texture_slot_later(index, write, frame, 2);
+                continue;
+            }
             match memory {
                 // Whole and uploaded: looked at again (see above).
                 Some((at, len)) => {

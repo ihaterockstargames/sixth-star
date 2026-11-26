@@ -1142,6 +1142,8 @@ pub(crate) struct HostTexture {
     /// (`crate::residency`): [`promote`] makes it again on the card once
     /// there is room.
     system: bool,
+    /// The frame it was made in ([`settled`]).
+    made_frame: u64,
 }
 
 /// What a title texture has on the host: its host copy and, for a depth
@@ -1683,6 +1685,20 @@ pub(crate) fn promote_idle(protect_ms: u64, frames: u64) -> usize {
     given_up
 }
 
+/// Whether the host copy of title texture `this` was made two frames ago
+/// or more: the upload that filled it has run by then, so a descriptor slot
+/// made again from it shows its texels to every list, also to one recorded
+/// before the upload and submitted after it ([`shows_stale`]).
+#[cfg(windows)]
+pub(crate) fn settled(this: This) -> bool {
+    if this.is_null() {
+        return false;
+    }
+    let r = resource(this);
+    let made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+    made.as_ref().is_some_and(|(host, _)| crate::frame::current() >= host.made_frame + 2)
+}
+
 /// Whether a descriptor slot that shows `shown` for title texture `this`
 /// shows a host copy [`promote`] gave up: the texture has a newer one, and
 /// the slot is to be made again from it.
@@ -1787,6 +1803,7 @@ impl HostTexture {
             bytes,
             filled: false,
             system,
+            made_frame: crate::frame::current(),
         }
     }
 }
