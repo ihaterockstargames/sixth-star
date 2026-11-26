@@ -635,6 +635,18 @@ fn frame_bench() {
     }
 }
 
+
+/// Prints the frame times' median, 95th percentile and worst (ms) after
+/// `tag`, for the parent that reads the child's output.
+fn print_distribution(tag: &str, times: &mut [f64]) {
+    if times.is_empty() {
+        return;
+    }
+    times.sort_by(f64::total_cmp);
+    let at = |q: f64| times[((times.len() - 1) as f64 * q).round() as usize];
+    println!("{tag} {} frames: median {:.1}, p95 {:.1}, worst {:.1}", times.len(), at(0.5), at(0.95), times[times.len() - 1]);
+}
+
 /// [`frame_bench`]'s frame, in a child process.
 #[test]
 #[ignore = "run by frame_bench in a child process"]
@@ -654,6 +666,7 @@ fn frame_child() {
     let frames: u64 = std::env::var("SIXTH_BENCH_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
     const COUNTED: u64 = 12;
     let mut alive_at_start = None;
+    let mut all_times: Vec<f64> = Vec::new();
     let hot = std::env::var("SIXTH_BENCH_HOT_MB").ok().and_then(|v| v.parse::<u64>().ok());
     // SAFETY: object creation on the host's device.
     let (root, read_pass, write_pass) = unsafe {
@@ -807,6 +820,10 @@ fn frame_child() {
         if held.len() > 2 {
             held.pop_front();
         }
+        // After the warm-up: the first frames move copies to the card.
+        if f >= (frames / 10).max(40) {
+            all_times.push(took);
+        }
         if f >= frames - COUNTED {
             times.push(took);
             for k in 0..3 {
@@ -838,6 +855,7 @@ fn frame_child() {
         .filter(|b| crate::shadow::find(b.1, 256).is_some_and(|c| c.carded()))
         .count();
     let per = |us: u64| us as f64 / 1e3 / COUNTED as f64;
+    print_distribution("FRAME-DIST", &mut all_times);
     if let Some(cpu) = crate::cpuprof::line(COUNTED as f64) {
         let refreshed = crate::host::PREPARING[1].load(std::sync::atomic::Ordering::Relaxed) as f64 / COUNTED as f64 / f64::from(1u32 << 20);
         println!(
@@ -937,6 +955,7 @@ fn late_child() {
     const COUNTED: u64 = 10;
     let hot = std::env::var("SIXTH_BENCH_HOT_MB").ok().and_then(|v| v.parse::<u64>().ok());
     let mut alive_at_start = None;
+    let mut all_times: Vec<f64> = Vec::new();
     let null = std::ptr::null();
     let queue_iid = iid(0x0ec870a6, 0x5d7e, 0x4c22, [0x8c, 0xfc, 0x5b, 0xaa, 0xe0, 0x76, 0x16, 0xed]);
     let fence_iid = iid(0x0a753dcf, 0xc4d8, 0x4b91, [0xad, 0xf6, 0xbe, 0x5a, 0x60, 0xd9, 0x5a, 0x76]);
@@ -1020,6 +1039,10 @@ fn late_child() {
         if f == 50.min(frames / 2) {
             alive_at_start = Some(crate::ledger::alive_total());
         }
+        // After the warm-up: the first frames move copies to the card.
+        if f >= (frames / 10).max(40) {
+            all_times.push(took);
+        }
         if f >= frames - COUNTED {
             times.push(took);
             split[0] += us[0];
@@ -1102,6 +1125,7 @@ fn late_child() {
     }
     times.sort_by(f64::total_cmp);
     let per = |us: u64| us as f64 / 1e3 / COUNTED as f64;
+    print_distribution("LATE-DIST", &mut all_times);
     if let Some(cpu) = crate::cpuprof::line(COUNTED as f64) {
         println!("LATE-CPU {cpu}");
     }
@@ -1631,4 +1655,185 @@ fn texture_copies_in_flight_hold_their_buffers_bytes() {
         let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
         assert!(out.status.success() && text.contains("LATE-ROW"), "{vars:?}: {text}");
     }
+}
+
+/// The time now, UTC, as `yyyy-mm-dd hh:mm`.
+fn utc_now() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let (days, rest) = ((secs / 86_400) as i64, secs % 86_400);
+    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02} {:02}:{:02}", rest / 3600, rest % 3600 / 60)
+}
+
+/// `ab.bat`'s configurations, as `scripts/ab.ps1` sets their switches.
+const AB_CONFIGS: [(&str, &[(&str, &str)]); 5] = [
+    ("baseline", &[]),
+    (
+        "best",
+        &[
+            ("VICTORY_CARD_BUFFERS_MIN_MB", "1"),
+            ("VICTORY_CARD_BUFFERS_MB", "1024"),
+            ("VICTORY_HOT_WINDOWS_MB", "1024"),
+            ("VICTORY_TEXTURE_FROM_COPY", "1"),
+        ],
+    ),
+    (
+        "bestlate",
+        &[
+            ("VICTORY_CARD_BUFFERS_MIN_MB", "1"),
+            ("VICTORY_CARD_BUFFERS_MB", "1024"),
+            ("VICTORY_HOT_WINDOWS_MB", "1024"),
+            ("VICTORY_TEXTURE_FROM_COPY", "1"),
+            ("VICTORY_LATE_WAIT", "3"),
+        ],
+    ),
+    ("hot1024", &[("VICTORY_HOT_WINDOWS_MB", "1024")]),
+    ("cardbuf1", &[("VICTORY_CARD_BUFFERS_MIN_MB", "1"), ("VICTORY_CARD_BUFFERS_MB", "1024")]),
+];
+
+/// Every switch a configuration may set, cleared for the others.
+const AB_SWITCHES: [&str; 12] = [
+    "VICTORY_CARD_BUFFERS_MIN_MB",
+    "VICTORY_CARD_BUFFERS_MB",
+    "VICTORY_HOT_WINDOWS_MB",
+    "VICTORY_TEXTURE_FROM_COPY",
+    "VICTORY_LATE_WAIT",
+    "VICTORY_RELAY",
+    "VICTORY_WIDE_REFRESH",
+    "VICTORY_WIDE_BACK",
+    "VICTORY_KEEP_SNAPSHOTS",
+    "VICTORY_BACK_NOTE",
+    "VICTORY_RESIDENCY",
+    "SIXTH_BENCH_HOT_MB",
+];
+
+/// One child run of `test` with `vars` and `frames`: its output, and
+/// whether it passed (its checks of every byte included).
+fn ab_child(test: &str, gate: &str, vars: &[(&str, &str)], frames: u64) -> (bool, String) {
+    let mut child = std::process::Command::new(std::env::current_exe().expect("the test binary"));
+    child
+        .args(["--exact", test, "--ignored", "--nocapture", "--test-threads", "1"])
+        .env(gate, "1")
+        .env("SIXTH_BENCH_FRAMES", frames.to_string());
+    for v in AB_SWITCHES {
+        child.env_remove(v);
+    }
+    for (k, v) in vars {
+        child.env(k, v);
+    }
+    let out = child.output().expect("the child ran");
+    let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    (out.status.success(), text)
+}
+
+/// The rest of the first line in `text` holding `tag`.
+fn after<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    text.lines().find_map(|l| l.split_once(tag).map(|(_, rest)| rest.trim()))
+}
+
+/// Synthetic A/B: `ab.bat`'s five configurations with their real switches,
+/// each in child processes, over two workloads through the runtime's own
+/// paths, with every byte checked: the game-shaped frame (`frame_child`)
+/// and texture streaming with submissions in flight through the title's
+/// queue (`late_child`). Writes a Markdown report to `SIXTH_AB_REPORT`
+/// (default `target/synthetic-ab.md`). `SIXTH_AB_FRAMES` sets the frames
+/// of the frame workload (default 300; the streaming one runs twice as
+/// many). Run with
+/// `cargo test -p victory-gpu --release --lib synthetic_ab -- --ignored --nocapture`.
+#[test]
+#[ignore = "a benchmark (several minutes, about 6 GiB of memory)"]
+fn synthetic_ab() {
+    let Some(host) = crate::host::host() else {
+        return;
+    };
+    let frames: u64 = std::env::var("SIXTH_AB_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+    let only: Option<Vec<String>> = std::env::var("SIXTH_AB_CONFIGS").ok().map(|v| v.split(',').map(str::to_owned).collect());
+    let mut out = vec![
+        "# Synthetic A/B through the runtime's own paths".to_owned(),
+        String::new(),
+        format!(
+            "Written {} (UTC). `ab.bat`'s configurations with their real switches, each in child processes. Not the title: two synthetic workloads through the runtime's own code, every byte they produce checked. Frame times are taken after a warm-up of 40 frames (or a tenth of the run), in which hot copies move to the card. GPU: {}.",
+            utc_now(),
+            crate::host::adapter_text()
+        ),
+        String::new(),
+        format!("- **frame**: a frame shaped like the game's measured one: 1 GiB of read-only title buffers read whole by the GPU (2% rewritten by the title each frame), 64 writable 4 MiB and 8 writable 16 MiB buffers 2% written by shaders, lists kept two frames; {frames} frames."),
+        format!("- **streaming**: eight title submissions a frame, each copying eight 4 MiB title buffers into textures (25% of the buffers rewritten before each), ending in a wait for the title's fence; {} frames.", 2 * frames),
+        String::new(),
+        "| configuration | frame: median ms (p95, worst) | frame: preparing / GPU / copy-back | streaming: median ms (p95, worst) | streaming: preparing | passed, memory |".to_owned(),
+        "|---|---|---|---|---|---|".to_owned(),
+    ];
+    let mut details = Vec::new();
+    for (name, vars) in AB_CONFIGS {
+        if only.as_ref().is_some_and(|o| !o.iter().any(|c| c == name)) {
+            continue;
+        }
+        let (frame_ok, frame) = ab_child("flights::frame_child", "SIXTH_FRAME_CHILD", vars, frames);
+        let (late_ok, late) = ab_child("flights::late_child", "SIXTH_LATE_CHILD", vars, 2 * frames);
+        let dist = |text: &str, tag: &str| {
+            after(text, tag)
+                .and_then(|d| {
+                    let num = |key: &str| d.split(key).nth(1).and_then(|r| r.split([',', ' ']).find(|x| !x.is_empty())).map(str::to_owned);
+                    Some(format!("{} ({}, {})", num("median ")?, num("p95 ")?, num("worst ")?))
+                })
+                .unwrap_or_else(|| "failed".to_owned())
+        };
+        let row = |text: &str, tag: &str| -> Vec<String> {
+            after(text, tag).map(|r| r.split('|').map(|x| x.trim().to_owned()).collect()).unwrap_or_default()
+        };
+        let f = row(&frame, "FRAME-ROW ");
+        let l = row(&late, "LATE-ROW ");
+        let memory = [after(&frame, "FRAME-SOAK "), after(&late, "LATE-SOAK ")]
+            .iter()
+            .zip(["frame", "streaming"])
+            .filter_map(|(m, which)| m.map(|m| format!("{which} {}", m.split(": ").nth(1).unwrap_or(m))))
+            .collect::<Vec<_>>()
+            .join("; ");
+        out.push(format!(
+            "| {name} | {} | {} / {} / {} | {} | {} | {}{} |",
+            dist(&frame, "FRAME-DIST "),
+            f.get(1).map_or("-", String::as_str),
+            f.get(2).map_or("-", String::as_str),
+            f.get(3).map_or("-", String::as_str),
+            dist(&late, "LATE-DIST "),
+            l.get(1).map_or("-", String::as_str),
+            if frame_ok && late_ok { "yes" } else { "**NO**" },
+            if memory.trim_matches([';', ' ']).is_empty() { String::new() } else { format!(", alive {memory}") }
+        ));
+        let settings = if vars.is_empty() {
+            "defaults".to_owned()
+        } else {
+            vars.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ")
+        };
+        details.push(format!("- **{name}**: {settings}"));
+        for (text, tags) in [(&frame, ["FRAME-CPU ", "FRAME-ROW "]), (&late, ["LATE-CPU ", "LATE-ROW "])] {
+            for tag in tags {
+                if let Some(line) = after(text, tag) {
+                    details.push(format!("  - {}`{line}`", tag.trim_end().to_lowercase().replace('-', " ") + ": "));
+                }
+            }
+        }
+        if !(frame_ok && late_ok) {
+            let why: Vec<&str> = frame.lines().chain(late.lines()).filter(|l| l.contains("panicked") || l.contains("failure")).collect();
+            details.push(format!("  - failed: {}", why.join(" | ")));
+        }
+        println!("{}", out.last().expect("a row"));
+    }
+    out.push(String::new());
+    out.push("## Details".to_owned());
+    out.push(String::new());
+    out.extend(details);
+    let path = std::env::var("SIXTH_AB_REPORT").unwrap_or_else(|_| "target/synthetic-ab.md".to_owned());
+    std::fs::write(&path, out.join("\n") + "\n").expect("the report written");
+    println!("report: {path}");
+    let _ = host;
 }
