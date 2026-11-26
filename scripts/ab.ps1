@@ -17,6 +17,8 @@
 #                  109 -> 16.5 ms, late_bench 70.6 -> 24.7 ms)
 #   texcopy        VICTORY_TEXTURE_FROM_COPY=1 (buffer-to-texture copies read
 #                  the buffer's host copy instead of a fresh upload)
+#   bestauto       best with VICTORY_HOT_WINDOWS_MB=auto (hot copies up to the
+#                  card's room; they go back first when it fills)
 #   bestrelay      best with VICTORY_RELAY=1 (submissions in flight, copy-back
 #                  on its own thread; passes the flights tests on this machine)
 #   bestlate       best with VICTORY_LATE_WAIT=3
@@ -60,13 +62,14 @@ $bin = Join-Path $repo 'target\release\sixth-star.exe'
 function Get-Overrides([string]$name) {
     switch -Regex ($name) {
         '^baseline$' { return [ordered]@{} }
-        '^hot(\d+)$' { return [ordered]@{ VICTORY_HOT_WINDOWS_MB = $Matches[1] } }
+        '^hot(\d+|auto)$' { return [ordered]@{ VICTORY_HOT_WINDOWS_MB = $Matches[1] } }
         '^noresidency$' { return [ordered]@{ VICTORY_RESIDENCY = '0' } }
         '^nopromote$' { return [ordered]@{ VICTORY_PROMOTE = '0' } }
         '^nonote$' { return [ordered]@{ VICTORY_BACK_NOTE = '0' } }
         '^cardbuf(\d+)$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = $Matches[1]; VICTORY_CARD_BUFFERS_MB = '1024' } }
         '^best$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_TEXTURE_FROM_COPY = '1' } }
         '^texcopy$' { return [ordered]@{ VICTORY_TEXTURE_FROM_COPY = '1' } }
+        '^bestauto$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = 'auto'; VICTORY_TEXTURE_FROM_COPY = '1' } }
         '^bestrelay$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_TEXTURE_FROM_COPY = '1'; VICTORY_RELAY = '1' } }
         '^bestlate$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_TEXTURE_FROM_COPY = '1'; VICTORY_LATE_WAIT = '3' } }
         '^wide$' { return [ordered]@{ VICTORY_WIDE_REFRESH = '1' } }
