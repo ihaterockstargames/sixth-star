@@ -4944,6 +4944,9 @@ impl Host {
                         if kept.len() < 64 {
                             kept.push(text.to_owned());
                         }
+                        // Tests have no log: the error goes to the output.
+                        #[cfg(test)]
+                        eprintln!("D3D12-DEBUG-ERROR: {text}");
                     }
                 }
             }
