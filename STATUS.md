@@ -1,6 +1,6 @@
 # Sixth Star — test status
 
-Last updated: 2026-11-26 (late evening)
+Last updated: 2026-11-26 (night)
 Build: current main
 Binary: sixth-star.exe
 
@@ -63,12 +63,19 @@ minutes or more without a crash; that has not been reached or measured.
   made again on the card, and the descriptor slots that showed them are
   remade. `VICTORY_PROMOTE=0` keeps them in the PC's memory. Not measured on
   the title yet.
-- Hot windows on the card (since `58a30ed`, **off by default**):
-  `VICTORY_HOT_WINDOWS_MB=1024` (for example, in `run.config.bat`) moves
-  windows of title memory that draws read frame after frame from the PC's
-  memory to the card, up to that many MB and only while the card has room.
-  It is an A/B switch: whether it is faster depends on how much of those
-  windows the title rewrites each frame, which is not measured yet.
+- Hot copies on the card (since `58a30ed`, one rule for windows and
+  title-buffer copies since `274f873`, **off by default**):
+  `VICTORY_HOT_WINDOWS_MB=1024` moves host copies that are used frame after
+  frame from the PC's memory to the card, up to that many MB and only while
+  the card has room. Title-buffer copies of 1 MiB or more that shaders write
+  go to the card when they are made with `VICTORY_CARD_BUFFERS_MIN_MB=1`
+  (also off by default; the default stays 16 MiB). Both are A/B switches:
+  in a synthetic frame they make it about 6 times faster (see Notes), but
+  they are not measured on the title yet. `ab.bat` runs the defaults and
+  them (`best`) one after the other and writes a comparison report.
+- Copy-back noting (since `bb57383`, default on): pages a copy-back wrote
+  whole are no longer copied back into the same copy at the next refresh.
+  `VICTORY_BACK_NOTE=0` turns it off.
 - A local pipeline skip list was active in every 2026-11-26 measurement (see
   Notes). Every figure on this page is from this machine with these
   settings.
@@ -155,6 +162,16 @@ Task Manager figures were not taken for this run.
   `docs/adr/0003-residency.md`. From `e2453a4` and `58a30ed` the `residency:`
   line also counts textures brought back to the card, the slots remade for
   them, and windows moved to the card.
+- Synthetic, on this machine (not the title; 2026-11-26, through the
+  runtime's own code, ADR 0003 §5): in a frame shaped like the game's
+  measured one (1 GiB read-only buffers read whole, 2% rewritten; 640 MiB of
+  writable buffers, 2% written by shaders; lists kept two frames), the
+  defaults take 109 ms (40 preparing, 42 on the GPU, 28 copying back);
+  `VICTORY_HOT_WINDOWS_MB=1024` with `VICTORY_CARD_BUFFERS_MIN_MB=1` takes
+  18.5 ms (8, 6 and 4). Reading 2 GiB of copies from the PC's memory took
+  83 ms of GPU time, from the card 8 ms. The late wait (`VICTORY_LATE_WAIT`)
+  and the relay pass new tests with submissions in flight in all six modes
+  on this machine; with one submission a frame they gain nothing here.
 - Synthetic, on this machine (not the title): 64 reads of a 2048x2048
   texture took 4.4 ms from the card and 41.1 ms from the PC's memory (9.3x);
   the card filled to 90% (6.08 of 6.72 GiB) placed a title-filled texture in
