@@ -1,0 +1,13 @@
+[package]
+name = "sixth-scheduler"
+description = "Gen 2 (ADR 0001 D7, ADR 0002 4.4): barriers and dependencies from declared resource uses, and batched uploads."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

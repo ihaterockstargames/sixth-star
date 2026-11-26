@@ -477,6 +477,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "sixth-scheduler"
+version = "0.1.0"
+
+[[package]]
 name = "sixth-telemetry"
 version = "0.1.0"
 
