@@ -13,10 +13,10 @@ titles. No game files are included; the user supplies their own dump.
 |---|---|
 | Stage | In-game (stage 6): gameplay is reached; **not playable yet** |
 | Loading and menus | ~30 FPS (user-reported, approximate) |
-| Gameplay | ~4.6 FPS: 217.9 ms/frame (measured by the maintainer from the runner's frame line on 2026-11-26) |
-| Intro cutscene | ~22 FPS: 21.5–23.0 (measured by the maintainer from the runner's frame line on 2026-11-26); the picture then **freezes** in the cutscene |
+| Gameplay | **4.59 FPS** (217.9 ms/frame), measured by the maintainer from the runner's frame line on 2026-11-26 |
+| Intro cutscene | 21.5–23.0 FPS (43.6–46.5 ms/frame), measured by the maintainer from the runner's frame line on 2026-11-26 |
 | What limits it | in gameplay, **the serial path**: CPU preparing, waiting for the GPU and copying back follow one another (see below); in the intro cutscene, the CPU |
-| Stability | not measured; the intro cutscene froze in the 2026-11-26 run (observed by the maintainer) |
+| Stability | in the maintainer's latest session on 2026-11-26 the title ran without a crash; the session's length was not recorded. An earlier run that day froze in the intro cutscene. From the next build the runner logs the exact session length every minute (see Notes) |
 | Picture | experimental: flickering, missing character textures (observed by the maintainer) |
 | Output | 1920x1080 |
 | Resizable BAR | enabled |
@@ -31,7 +31,7 @@ minutes or more without a crash; that has not been reached or measured.
 | Field | Value |
 |---|---|
 | GPU | NVIDIA GeForce RTX 3070 8 GB |
-| Driver | 610.88 |
+| Driver | 610.88 (user-mode driver 32.0.16.1088, read from the device on 2026-11-26) |
 | CPU | AMD Ryzen 7 5800X |
 | OS | Windows 11 Pro 26100, UEFI |
 | Resizable BAR | enabled (BAR1 8192 MiB / VRAM 8192 MiB) |
@@ -47,6 +47,9 @@ minutes or more without a crash; that has not been reached or measured.
 - Other non-default settings: `DRED=1` (more detail on a device removal; a
   little slower). `CONSOLE=series-x`, `PRESET=safe`, `SHADER_OPT=0` are the
   defaults.
+- A local pipeline skip list was active in every 2026-11-26 measurement (see
+  Notes). Every figure on this page is from this machine with these
+  settings.
 
 ## Where the frame time goes (2026-11-26, gameplay)
 
@@ -54,7 +57,7 @@ Gameplay, measured by the maintainer from the runner's frame line on 2026-11-26:
 
 | Measure | ms per frame |
 |---|---|
-| Frame time | 217.9 (~4.6 FPS) |
+| Frame time | 217.9 (4.59 FPS) |
 | CPU preparing submissions | 82.3 |
 | Waiting for the GPU ("on the GPU") | 86.6 |
 | Copying back to title memory | 44.7 |
@@ -85,18 +88,19 @@ and about a dozen card-clock lines, over about 15 seconds:
 | Textures picked by index | about 12,400–12,600 waiting, about 17,800 passed over as unmapped |
 
 So the frame is **CPU-bound**: one submitting thread sets the pace and the
-GPU waits for it. The CPU work is being made cheaper first (plain copies,
-fewer write-watch askings, preparing on more threads), each change behind a
-switch and measured before it becomes the default. Task Manager figures were
-not taken for this run.
+GPU waits for it. Making the copies themselves faster was measured and does
+not help (moving the bytes is a few ms; finding what changed is the cost).
+The plan removes that work instead: see `docs/adr/0002-structural-roadmap.md`.
+Task Manager figures were not taken for this run.
 
 ## History
 
 | Date | Build | Result | Notes |
 |---|---|---|---|
 | 2026-11-26 | current main | ~30 FPS loading/menus, ~5 FPS in-game | first public record; user-reported, approximate; 1080p, ReBAR on |
-| 2026-11-26 | current main (build not recorded) | gameplay ~4.6 FPS (217.9 ms/frame) | measured by the maintainer from the runner's frame line on 2026-11-26: 82.3 ms CPU preparing, 86.6 ms waiting for the GPU, 44.7 ms copying back, in series |
-| 2026-11-26 | `3bc7b56` | intro cutscene ~22 FPS, then the picture freezes | measured by the maintainer from the runner's frame line on 2026-11-26: ~27 ms CPU preparing, ~11 ms GPU, GPU ~25% busy (CPU-bound); flickering, missing character textures and a slow start-up observed by the maintainer |
+| 2026-11-26 | current main (build not recorded) | ran without a crash | latest session, observed by the maintainer; length not recorded |
+| 2026-11-26 | current main (build not recorded) | gameplay 4.59 FPS (217.9 ms/frame) | measured by the maintainer from the runner's frame line on 2026-11-26: 82.3 ms CPU preparing, 86.6 ms waiting for the GPU, 44.7 ms copying back, in series |
+| 2026-11-26 | `3bc7b56` | intro cutscene 21.5–23.0 FPS, then the picture froze | measured by the maintainer from the runner's frame line on 2026-11-26: ~27 ms CPU preparing, ~11 ms GPU, GPU ~25% busy (CPU-bound); flickering, missing character textures and a slow start-up observed by the maintainer |
 
 ## Notes
 
@@ -105,6 +109,13 @@ not taken for this run.
   aid kept outside the repository): the intro frame line shows 1 draw or
   dispatch per frame not run. Later measurements say whether it was on.
 - The test title is not named in this repository.
+- From commit after `23c80c2` the runner writes a `session:` line every
+  minute: time since the first present, frames, exact average FPS, the worst
+  second, the longest time between two presents, seconds in which draws were
+  not run, the GPU and driver, the display mode and the `VICTORY_*` settings
+  (without paths). A freeze gets a `watchdog:` line with the seconds since the
+  first present. Those lines are the source for session length and stability
+  here.
 - The runner's frame line (logged every few seconds) splits each frame into
   time spent preparing submissions on the CPU and time on the GPU. In the
   intro cutscene the CPU side is more than twice the GPU side; see "Where the
