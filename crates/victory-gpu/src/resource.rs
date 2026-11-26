@@ -1802,7 +1802,12 @@ fn host_texture(
     };
     // SAFETY: a plain query; the description has the host layout.
     let bytes = unsafe { host.device.GetResourceAllocationInfo(0, &[std::ptr::from_ref(&d).cast::<D3D12_RESOURCE_DESC>().read()]) }.SizeInBytes;
-    let placement = match crate::residency::place(class, bytes) {
+    let decided = if crate::residency::on() {
+        crate::residency::place(class, bytes)
+    } else {
+        sixth_memory::residency::Placement::Local
+    };
+    let placement = match decided {
         sixth_memory::residency::Placement::System => sixth_memory::residency::Placement::System,
         // Refused for the pass that makes textures picked by index, which
         // asks first; made on the card here, as before.

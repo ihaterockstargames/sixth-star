@@ -1573,7 +1573,10 @@ impl State {
         // are made in the PC's memory, read over the bus but there. Only
         // when neither pool has room do the slots wait, counted.
         let mut room = crate::resource::room();
-        if !room {
+        if !room && !crate::residency::on() {
+            HEAP_TEXTURES_FULL.fetch_add(1, Ordering::Relaxed);
+            once!("textures picked by index: the card has no room for more; they wait (VICTORY_RESIDENCY=0)");
+        } else if !room {
             HEAP_TEXTURES_FULL.fetch_add(1, Ordering::Relaxed);
             crate::resource::reclaim();
             room = !matches!(

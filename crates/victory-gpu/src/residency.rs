@@ -21,6 +21,14 @@ use windows::Win32::Graphics::Direct3D12::*;
 
 static STATE: Mutex<Option<Residency>> = Mutex::new(None);
 
+/// Whether the residency decisions are used (`VICTORY_RESIDENCY=0`: the
+/// inherited rule, no texture made past nine tenths of the budget, none
+/// given up early, none in the PC's memory). On by default.
+pub(crate) fn on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_RESIDENCY").is_none_or(|v| v != "0"))
+}
+
 /// Since the start: host textures made in the PC's memory for lack of room
 /// on the card; textures given up under pressure and their bytes; texture
 /// passes that found no room and nothing to fall back to.
