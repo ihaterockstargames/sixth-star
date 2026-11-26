@@ -23,6 +23,7 @@
 #   keepsnap       VICTORY_KEEP_SNAPSHOTS=1
 #   noresidency    VICTORY_RESIDENCY=0 (the inherited texture rule)
 #   nopromote      VICTORY_PROMOTE=0
+#   nonote         VICTORY_BACK_NOTE=0 (copy-back pages copied again, as before bb57383)
 #   relay          VICTORY_RELAY=1 (asynchronous copy-back; experimental)
 #   late<N>        VICTORY_LATE_WAIT=<N> (submissions in flight; experimental)
 #   name:VAR=v;VAR=v  anything else, named
@@ -61,6 +62,7 @@ function Get-Overrides([string]$name) {
         '^hot(\d+)$' { return [ordered]@{ VICTORY_HOT_WINDOWS_MB = $Matches[1] } }
         '^noresidency$' { return [ordered]@{ VICTORY_RESIDENCY = '0' } }
         '^nopromote$' { return [ordered]@{ VICTORY_PROMOTE = '0' } }
+        '^nonote$' { return [ordered]@{ VICTORY_BACK_NOTE = '0' } }
         '^cardbuf(\d+)$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = $Matches[1]; VICTORY_CARD_BUFFERS_MB = '1024' } }
         '^best$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024' } }
         '^bestrelay$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_RELAY = '1' } }
@@ -298,7 +300,7 @@ try {
         # Every switch the configurations use is cleared first, so a
         # setting in run.config.bat does not leak into another configuration.
         foreach ($v in @('VICTORY_HOT_WINDOWS_MB', 'VICTORY_RESIDENCY', 'VICTORY_PROMOTE', 'VICTORY_RELAY', 'VICTORY_LATE_WAIT',
-                'VICTORY_CARD_BUFFERS_MIN_MB', 'VICTORY_CARD_BUFFERS_MB', 'VICTORY_WIDE_REFRESH', 'VICTORY_KEEP_SNAPSHOTS')) {
+                'VICTORY_CARD_BUFFERS_MIN_MB', 'VICTORY_CARD_BUFFERS_MB', 'VICTORY_WIDE_REFRESH', 'VICTORY_KEEP_SNAPSHOTS', 'VICTORY_BACK_NOTE')) {
             if (-not $over.Contains($v)) { $lines += "set `"$v=`"" }
         }
         foreach ($k in $over.Keys) { $lines += "set `"$k=$($over[$k])`"" }
