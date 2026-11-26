@@ -803,6 +803,149 @@ mod tests {
         }
     }
 
+    /// Runs `f` with `VICTORY_PLAIN_COPY` set to `on` for this thread.
+    fn with_plain<T>(on: bool, f: impl FnOnce() -> T) -> T {
+        super::PLAIN_COPY_TEST.with(|c| c.set(Some(on)));
+        let out = f();
+        super::PLAIN_COPY_TEST.with(|c| c.set(None));
+        out
+    }
+
+    /// The plain path gives exactly the kernel path's bytes over every kind
+    /// of page a title region can hold: written, committed but never
+    /// touched, no access, guard, reserved and decommitted. Only resident
+    /// readable runs are read in place; the rest goes to the kernel.
+    #[test]
+    fn plain_copies_match_kernel_copies_over_every_page_kind() {
+        use windows_sys::Win32::System::Memory::*;
+        const P: usize = 4096;
+        const N: usize = 16 * P;
+        // SAFETY: a private region of our own; pages are touched only while
+        // committed read-write.
+        unsafe {
+            let base = VirtualAlloc(std::ptr::null(), N, MEM_RESERVE, PAGE_NOACCESS).cast::<u8>();
+            assert!(!base.is_null());
+            let commit = |page: usize, protect: u32, fill: Option<u8>| {
+                let at = base.add(page * P);
+                assert_eq!(VirtualAlloc(at.cast(), P, MEM_COMMIT, PAGE_READWRITE), at.cast());
+                if let Some(v) = fill {
+                    at.write_bytes(v, P);
+                }
+                if protect != PAGE_READWRITE {
+                    let mut old = 0;
+                    assert_ne!(VirtualProtect(at.cast(), P, protect, &mut old), 0);
+                }
+            };
+            // Pages 0-3 written, 4 committed and never touched, 5 no access,
+            // 6 guard, 7 reserved only, 8-11 written, 12 written then
+            // decommitted, 13-15 written read-only.
+            for p in (0..4).chain(8..12) {
+                commit(p, PAGE_READWRITE, Some(p as u8 + 1));
+            }
+            commit(4, PAGE_READWRITE, None);
+            commit(5, PAGE_NOACCESS, Some(0x55));
+            commit(6, PAGE_READWRITE | PAGE_GUARD, Some(0x66));
+            commit(12, PAGE_READWRITE, Some(0x77));
+            assert_ne!(VirtualFree(base.add(12 * P).cast(), P, MEM_DECOMMIT), 0);
+            for p in 13..16 {
+                commit(p, PAGE_READONLY, Some(p as u8 + 1));
+            }
+
+            // Wholly resident and readable: in place.
+            assert!(super::resident_readable(base as usize, 4 * P));
+            assert!(super::resident_readable(base.add(8 * P) as usize, 4 * P));
+            assert!(super::resident_readable(base.add(13 * P) as usize, 3 * P));
+            // Any other page in the range: not in place.
+            for p in 4..8 {
+                assert!(!super::resident_readable(base.add(p * P) as usize, P), "page {p}");
+            }
+            assert!(!super::resident_readable(base.add(12 * P) as usize, P));
+            assert!(!super::resident_readable(base as usize, N));
+
+            // A kernel read may take the guard away (it is one-shot), so it
+            // is set again before each copy: each path sees the same pages.
+            let rearm = || {
+                let mut old = 0;
+                assert_ne!(VirtualProtect(base.add(6 * P).cast(), P, PAGE_READWRITE | PAGE_GUARD, &mut old), 0);
+            };
+            // Whole-range copies and reads, each way, at odd offsets.
+            for (from, len) in [(27, N - 54), (0, 4 * P), (8 * P + 3, 4 * P - 3), (13 * P, 3 * P), (2 * P, 8 * P)] {
+                let src = base.add(from);
+                let [kernel, plain] = [false, true].map(|on| {
+                    rearm();
+                    with_plain(on, || {
+                        let mut out = vec![0xeeu8; len];
+                        super::copy_mapped(out.as_mut_ptr(), src, len, false);
+                        out
+                    })
+                });
+                assert!(kernel == plain, "copy_mapped at {from:#x}+{len:#x}");
+                let [k, p] = [false, true].map(|on| {
+                    rearm();
+                    with_plain(on, || {
+                        let mut out = vec![0u8; len];
+                        let whole = super::read_into(src, &mut out);
+                        (whole, whole.then_some(out))
+                    })
+                });
+                assert_eq!(k, p, "read_into at {from:#x}+{len:#x}");
+            }
+            assert_ne!(VirtualFree(base.cast(), 0, MEM_RELEASE), 0);
+        }
+    }
+
+    /// While the runtime changes the mapping of the bytes, the plain path
+    /// stands aside (and does not wait); afterwards it reads in place again.
+    #[test]
+    fn plain_copy_stands_aside_while_a_mapping_changes() {
+        let src = vec![0x5au8; 64 << 10];
+        let mut out = vec![0u8; src.len()];
+        {
+            let _changing = crate::watch::title_memory_remapping(src.as_ptr() as usize + 4096, 4096);
+            assert!(!super::read_plain(src.as_ptr(), out.as_mut_ptr(), src.len()));
+            assert!(out.iter().all(|&v| v == 0), "nothing written while standing aside");
+        }
+        assert!(super::read_plain(src.as_ptr(), out.as_mut_ptr(), src.len()));
+        assert_eq!(out, src);
+    }
+
+    /// Isolated benchmark: plain copies (checks included) against the
+    /// kernel's, over resident memory. Prints GB/s; asserts only equality.
+    /// `cargo test -p victory-gpu --release plain_copy_benchmark -- --ignored --nocapture`
+    #[test]
+    #[ignore = "benchmark"]
+    fn plain_copy_benchmark() {
+        for size in [64usize << 10, 1 << 20, 32 << 20] {
+            let src: Vec<u8> = (0..size).map(|i| (i * 31 + 7) as u8).collect();
+            let mut dst = vec![0u8; size];
+            let rounds = ((256usize << 20) / size).max(4);
+            let mut gbs = [0f64; 2];
+            for (i, on) in [false, true].into_iter().enumerate() {
+                with_plain(on, || {
+                    // Warm-up, then the best of five timed batches.
+                    super::copy_mapped(dst.as_mut_ptr(), src.as_ptr(), size, false);
+                    let mut best = f64::MAX;
+                    for _ in 0..5 {
+                        let started = std::time::Instant::now();
+                        for _ in 0..rounds {
+                            super::copy_mapped(dst.as_mut_ptr(), src.as_ptr(), size, false);
+                        }
+                        best = best.min(started.elapsed().as_secs_f64());
+                    }
+                    gbs[i] = (size * rounds) as f64 / best / 1e9;
+                });
+                assert_eq!(dst, src);
+            }
+            println!(
+                "plain_copy_benchmark: {:>6} KiB: kernel {:.2} GB/s, plain {:.2} GB/s ({:.2}x)",
+                size >> 10,
+                gbs[0],
+                gbs[1],
+                gbs[1] / gbs[0]
+            );
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -5709,7 +5852,9 @@ pub(crate) fn copy_mapped(dst: *mut u8, src: *const u8, len: usize, title_dst: b
     }
     #[cfg(feature = "diagnostics")]
     let moved = std::time::Instant::now();
-    let whole = read(src, dst, len);
+    // Into a host copy the source may be read in place (`VICTORY_PLAIN_COPY`);
+    // a title destination is always written through the kernel.
+    let whole = if title_dst { read(src, dst, len) } else { read_title(src, dst, len) };
     #[cfg(feature = "diagnostics")]
     crate::copystat::add(crate::copystat::C::MoveUs, moved.elapsed().as_micros() as u64);
     if whole {
@@ -5789,7 +5934,139 @@ fn read_pieces(src: *const u8, dst: *mut u8, len: usize) {
 /// Reads title memory at `src` into `dst`; false if a page of it is not
 /// readable.
 pub(crate) fn read_into(src: *const u8, dst: &mut [u8]) -> bool {
-    read(src, dst.as_mut_ptr(), dst.len())
+    read_title(src, dst.as_mut_ptr(), dst.len())
+}
+
+/// Whether reads of title memory into our own memory may be plain
+/// in-process copies (`VICTORY_PLAIN_COPY=1`; off by default), an isolated
+/// experiment measured against the kernel's copy.
+///
+/// The kernel's copy (`ReadProcessMemory`) survives a page that is not there
+/// and reports it; a plain copy would fault. So a plain copy is made only
+/// when, at that moment, (1) no change of mapping of those bytes is under
+/// way or waiting and none can begin until the copy ends
+/// ([`crate::watch::title_memory_reading_now`], which never waits), and (2)
+/// every 4 KiB page of the source is resident and readable by the working
+/// set's own answer ([`resident_readable`]: no page-table walk, unlike
+/// `VirtualQuery`). Anything else goes through the kernel as before, so the
+/// copy's bytes are the same either way.
+///
+/// What it does not cover: a title freeing or protecting its own memory
+/// with the host's calls while we copy (the runtime does not take those
+/// calls over yet; [`crate::inplace::title_memory_freeing`]). With the
+/// switch off nothing changes.
+///
+/// After kelvaroq's `0044-copy-plain` (GPL-3.0), which measured 7-12% and
+/// removed spikes over a second; the safety conditions here are our own.
+///
+/// Measured in isolation (`plain_copy_benchmark`, resident memory, Ryzen 7
+/// 5800X, best of five): the kernel's copy moves 24.8 GB/s at 64 KiB, 28.0
+/// at 1 MiB and 11.6-11.9 at 32 MiB; the plain path 3.0, 24.5 and 21.4-21.6.
+/// The checks cost more than they save below about a megabyte, and above it
+/// the gain is about 1.3 ms for 32 MB. Moving the bytes is not what makes a
+/// frame's "copies" take tens of milliseconds (finding what changed is), so
+/// the switch stays off: kept as a measured experiment, not a lever.
+fn plain_copy() -> bool {
+    #[cfg(test)]
+    if let Some(on) = PLAIN_COPY_TEST.with(std::cell::Cell::get) {
+        return on;
+    }
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_PLAIN_COPY").is_some_and(|v| v == "1"))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The switch for this test thread only.
+    static PLAIN_COPY_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Below this a plain copy saves less than its checks cost.
+const PLAIN_MIN: usize = 4 << 10;
+
+/// Since the last frame line: bytes read in place, and bytes the plain path
+/// left to the kernel (a page not resident, or a mapping being changed).
+pub(crate) static PLAIN_BYTES: [std::sync::atomic::AtomicU64; 2] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
+/// Reads title memory at `src` into our memory at `dst`: in place when
+/// [`plain_copy`] allows it, else through the kernel. False if a page of the
+/// source cannot be read (and then `dst` may hold part of it).
+fn read_title(src: *const u8, dst: *mut u8, len: usize) -> bool {
+    if len >= PLAIN_MIN && plain_copy() {
+        if read_plain(src, dst, len) {
+            PLAIN_BYTES[0].fetch_add(len as u64, Ordering::Relaxed);
+            return true;
+        }
+        PLAIN_BYTES[1].fetch_add(len as u64, Ordering::Relaxed);
+    }
+    read(src, dst, len)
+}
+
+/// The plain copy, if it is safe now (see [`plain_copy`]); false and nothing
+/// written otherwise.
+fn read_plain(src: *const u8, dst: *mut u8, len: usize) -> bool {
+    let Some(_held) = crate::watch::title_memory_reading_now(src as usize, len) else {
+        return false;
+    };
+    if !resident_readable(src as usize, len) {
+        return false;
+    }
+    // SAFETY: every page of the source is resident and readable, and no
+    // change of its mapping can begin while `_held` lives; the destination is
+    // the caller's writable memory of `len` bytes, apart from the source.
+    unsafe { std::ptr::copy_nonoverlapping(src, dst, len) };
+    true
+}
+
+/// Whether every 4 KiB page of `[at, at + len)` (`len > 0`) is in the
+/// working set and readable, by the kernel's answer for each page
+/// (`QueryWorkingSetEx`, up to 256 pages a question). A page that is not
+/// resident (never touched, trimmed, or not there) counts as not readable:
+/// the caller then uses the kernel's copy, which tells those apart.
+pub(crate) fn resident_readable(at: usize, len: usize) -> bool {
+    use windows_sys::Win32::System::ProcessStatus::{K32QueryWorkingSetEx, PSAPI_WORKING_SET_EX_INFORMATION};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    const KERNEL_PAGE: usize = 4096;
+    // `PAGE_READONLY`, `PAGE_READWRITE`, `PAGE_WRITECOPY` and their
+    // executable kinds; `PAGE_NOACCESS` and `PAGE_GUARD` refuse.
+    const READABLE: usize = 0x02 | 0x04 | 0x08 | 0x20 | 0x40 | 0x80;
+    const REFUSED: usize = 0x01 | 0x100;
+    if len == 0 {
+        return true;
+    }
+    let (first, last) = (at / KERNEL_PAGE, at.saturating_add(len - 1) / KERNEL_PAGE);
+    // SAFETY: plain data.
+    let mut info: [PSAPI_WORKING_SET_EX_INFORMATION; 256] = unsafe { std::mem::zeroed() };
+    let mut page = first;
+    while page <= last {
+        let n = (last - page + 1).min(info.len());
+        for (i, entry) in info[..n].iter_mut().enumerate() {
+            entry.VirtualAddress = ((page + i) * KERNEL_PAGE) as *mut _;
+        }
+        // SAFETY: `n` entries of the size given; our own process.
+        let asked = unsafe {
+            K32QueryWorkingSetEx(
+                GetCurrentProcess(),
+                info.as_mut_ptr().cast(),
+                (n * size_of::<PSAPI_WORKING_SET_EX_INFORMATION>()) as u32,
+            )
+        } != 0;
+        if !asked {
+            return false;
+        }
+        for entry in &info[..n] {
+            // SAFETY: plain data the query filled in.
+            let flags = unsafe { entry.VirtualAttributes.Flags };
+            // Bit 0: valid (resident); bits 4-14: the page's protection.
+            let protection = (flags >> 4) & 0x7ff;
+            if flags & 1 == 0 || protection & READABLE == 0 || protection & REFUSED != 0 {
+                return false;
+            }
+        }
+        page += n;
+    }
+    true
 }
 
 /// Copies `len` bytes from `src` to `dst` unless a source page is not
@@ -6374,6 +6651,13 @@ impl Meter {
                     if crate::watch::by_range() { "the bytes it changes" } else { "all of title memory" }
                 );
             }
+        }
+        if plain_copy() {
+            let [inplace, left] = [0, 1].map(|i| PLAIN_BYTES[i].swap(0, Ordering::Relaxed) as f64 / 1e6 / frames);
+            tracing::info!(
+                "reads of title memory per frame (VICTORY_PLAIN_COPY=1): {inplace:.1} MB copied in place, \
+                 {left:.1} MB left to the kernel (a page not resident, or its mapping being changed)"
+            );
         }
         {
             let [copies, joined] = [0, 1].map(|i| COPIES_JOINED[i].swap(0, Ordering::Relaxed) as f64 / frames);
