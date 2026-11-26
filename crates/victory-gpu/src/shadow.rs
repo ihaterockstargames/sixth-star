@@ -417,8 +417,10 @@ fn warmed(shadow: &Shadow, frame: u64) -> u64 {
 /// Whether `shadow`, asked for `run` frames in a row, goes to the card now
 /// (`sixth_memory::residency::Residency::copy_home`). `writable`: the title
 /// resource it copies may be written by shaders (windows: unknown, so by
-/// what was declared for it).
-fn goes_up(shadow: &Shadow, run: u64, writable: bool) -> bool {
+/// what was declared for it). One shaders write moves only when nothing
+/// but the map has it; its card side then finds their writes on the card,
+/// as the big copies' do (`Host::card_before`).
+fn goes_up(shadow: &Arc<Shadow>, run: u64, writable: bool) -> bool {
     let has_twin = shadow.twin_old.lock().unwrap_or_else(|e| e.into_inner()).is_some()
         || shadow.twin_new.lock().unwrap_or_else(|e| e.into_inner()).strong_count() > 0;
     let pending = !shadow.pending.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
@@ -429,6 +431,8 @@ fn goes_up(shadow: &Shadow, run: u64, writable: bool) -> bool {
         in_place: shadow.place.is_some(),
         on_card: shadow.card.is_some() || has_twin,
         flights: crate::host::late(),
+        // The map's handle is the one count when nothing else has it.
+        alone: Arc::strong_count(shadow) == 1 && crate::host::references(&shadow.buffer) == 1,
     };
     crate::residency::copy_home(&u, HOT_FRAMES) == sixth_memory::residency::CopyHome::Card
 }
@@ -3722,7 +3726,8 @@ mod hot_window_tests {
 
     /// A title buffer shaders cannot write, asked for frame after frame,
     /// moves to the card by the same rule as windows; one made for
-    /// unordered access stays in the PC's memory.
+    /// unordered access stays in the PC's memory while anything else has
+    /// it, and moves, with no twin, once nothing does.
     #[test]
     fn a_hot_read_only_buffer_moves_and_a_writable_one_stays() {
         if host().is_none() {
@@ -3751,9 +3756,14 @@ mod hot_window_tests {
         assert!(moved.twin().is_none());
         let writable = ask(wat, 6000);
         for frame in 6001..6000 + 2 * HOT_FRAMES {
-            assert!(Arc::ptr_eq(&ask(wat, frame), &writable), "shaders may write it: stays, frame {frame}");
+            assert!(Arc::ptr_eq(&ask(wat, frame), &writable), "shaders may write it and it is held: stays, frame {frame}");
         }
         assert!(!writable.carded());
+        // Once nothing else has it, it is replaced outright, with no twin.
+        drop(writable);
+        let alone = ask(wat, 6000 + 2 * HOT_FRAMES);
+        assert!(alone.carded(), "writable, alone: moved");
+        assert!(alone.twin().is_none(), "no twin for a copy shaders write");
         TEST_HOT.with(|h| h.set(None));
         TEST_FRAME.with(|f| f.set(None));
     }

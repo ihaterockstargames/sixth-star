@@ -450,7 +450,10 @@ fn copyback_bench() {
             let threads = (len as u32 / stride).max(1);
             let mut times = Vec::new();
             let mut split = [0u64; 3];
+            // `SIXTH_BENCH_HOT_MB`: hot copies move on (the unified rule).
+            let hot = std::env::var("SIXTH_BENCH_HOT_MB").ok().and_then(|v| v.parse::<u64>().ok());
             for f in 0..FRAMES {
+                crate::shadow::test_hot(hot, Some(300_000 + f + len as u64));
                 let _ = crate::host::take_submission_us();
                 let began = std::time::Instant::now();
                 let list = host.new_list().expect("a host list");
