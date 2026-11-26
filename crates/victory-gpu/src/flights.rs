@@ -631,8 +631,11 @@ fn frame_child() {
     const READ: usize = 256;
     const SMALL: usize = 64;
     const BIG: usize = 8;
-    const FRAMES: u64 = 40;
+    // `SIXTH_BENCH_FRAMES`: more frames, for a soak (the host's memory is
+    // then checked not to grow).
+    let frames: u64 = std::env::var("SIXTH_BENCH_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
     const COUNTED: u64 = 12;
+    let mut alive_at_start = None;
     let hot = std::env::var("SIXTH_BENCH_HOT_MB").ok().and_then(|v| v.parse::<u64>().ok());
     // SAFETY: object creation on the host's device.
     let (root, read_pass, write_pass) = unsafe {
@@ -714,8 +717,8 @@ fn frame_child() {
     let stride = if sparse { 200u32 << 10 } else { 4 };
     let mut held: std::collections::VecDeque<crate::host::HostList> = std::collections::VecDeque::new();
     let (mut times, mut split) = (Vec::new(), [0u64; 3]);
-    for f in 0..FRAMES {
-        if f == FRAMES - COUNTED {
+    for f in 0..frames {
+        if f == frames - COUNTED {
             // The CPU time by kind from here (`crate::cpuprof`), and the
             // bytes refreshes copied.
             let _ = crate::cpuprof::take();
@@ -778,12 +781,15 @@ fn frame_child() {
         }
         let took = began.elapsed().as_secs_f64() * 1e3;
         let us = crate::host::take_submission_us();
+        if f == 50.min(frames / 2) {
+            alive_at_start = Some(crate::ledger::alive_total());
+        }
         // Kept two frames, as the title keeps its lists until it resets them.
         held.push_back(list);
         if held.len() > 2 {
             held.pop_front();
         }
-        if f >= FRAMES - COUNTED {
+        if f >= frames - COUNTED {
             times.push(took);
             for k in 0..3 {
                 split[k] += us[k];
@@ -791,8 +797,17 @@ fn frame_child() {
         }
     }
     assert_eq!(crate::descriptor::host::device_removed(), None);
+    if frames >= 500
+        && let Some((count, bytes)) = alive_at_start
+    {
+        drop(held);
+        crate::shadow::let_go_idle();
+        let (now_count, now_bytes) = crate::ledger::alive_total();
+        println!("FRAME-SOAK alive from frame 50 to {frames}: {count} -> {now_count} resources, {} -> {} MiB", bytes >> 20, now_bytes >> 20);
+        assert!(now_bytes <= bytes + (64 << 20), "the host's memory grew from {} to {} MiB", bytes >> 20, now_bytes >> 20);
+    }
     // The last frame's shader writes are in title memory.
-    let last = (FRAMES - 1) as u32;
+    let last = (frames - 1) as u32;
     for b in &writes {
         // SAFETY: inside the buffer's own memory.
         let got = unsafe { ((b.1 as usize + stride as usize) as *const u32).read() };
