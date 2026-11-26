@@ -159,7 +159,9 @@ Everything except `victory-game` is platform-level and can be tested with any Xb
 | `WORK_DIR` | `GAME_DIR` | the title's working directory |
 | `MANIFEST` | `GAME_DIR\MicrosoftGame.config` | another manifest |
 | `CONSOLE` | `series-x` | `series-s` renders at 720p with FSR and needs `FFX_DIR` |
-| `DISPLAY_MODE` | `1920x1080` | display size reported to the title; it picks its render size from this (`2560x1440` and `3840x2160` also work) |
+| `OUTPUT_MODE` | empty | window and swap chain size (`WxH`); empty follows the title's image |
+| `RENDER_SCALE` | `1.0` | 0.1 to 2.0: the title renders at `OUTPUT_MODE` (or 1920x1080) times this, and the image is scaled to the window |
+| `DISPLAY_MODE` | empty | display size reported to the title outright; wins over `OUTPUT_MODE` x `RENDER_SCALE` |
 | `BCPACK_TABLES` | empty | path to `bcpack-tables.bin`; empty uses the copy in `crates\victory-formats\src` or next to `sixth-star.exe` |
 | `PRESET` | `safe` | `fast` gives lower latency but can be less stable |
 | `SKIP_PIPELINES` / `SKIP_LIST` | none | shader hashes to skip, for a driver that never finishes compiling one |
@@ -171,6 +173,19 @@ Everything except `victory-game` is platform-level and can be tested with any Xb
 </details>
 
 To keep the settings somewhere else, set `SIXTH_CONFIG` to that file.
+
+### Resolution scaling
+
+The title is told a display size and picks its render size from it; the runner then scales the image to the window. With nothing set, it is told 1920x1080 and the window follows its image, as before.
+
+| Goal | `OUTPUT_MODE` | `RENDER_SCALE` | The title is told |
+|---|---|---|---|
+| 1080p native | `1920x1080` | `1.0` | 1920x1080 |
+| 720p shown at 1080p | `1920x1080` | `0.6667` | 1280x720 |
+| 1080p shown at 1440p | `2560x1440` | `0.75` | 1920x1080 |
+| 1080p shown at 4K | `3840x2160` | `0.5` | 1920x1080 |
+
+`run.bat doctor` prints the computed display, output and scale. At start the runner logs `resolution:` and, whenever it changes, `present: source=WxH output=WxH copy|draw|scale`. A title in a borderless fullscreen window keeps its window size; the output is scaled into it.
 
 ### How the files are found
 
