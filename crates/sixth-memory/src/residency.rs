@@ -129,9 +129,10 @@ pub struct CopyUse {
     pub in_place: bool,
     /// It already has a side on the card.
     pub on_card: bool,
-    /// Submissions may be in flight while it moves (the late wait): a
-    /// refresh of the new copy could read title memory a flight is still
-    /// to write back.
+    /// Submissions may be in flight while it moves (the late wait). Matters
+    /// only for a copy shaders may write that something holds: a flight
+    /// may be about to write it back. A read-only copy has nothing a
+    /// flight writes back, and one nothing holds is in no flight.
     pub flights: bool,
     /// Nothing but the backend's own map has it (no list, no descriptor
     /// slot): it can be replaced outright, with no second copy kept.
@@ -318,13 +319,13 @@ impl Residency {
     /// Where a host copy of title memory now in the PC's memory goes:
     /// to the card once it has been used `hot_frames` frames in a row, while
     /// the card has room for it ([`Residency::promotable`]), unless it is
-    /// title memory itself, it is on the card already, or submissions may
-    /// be in flight. One shaders may write moves only when nothing else has
-    /// it: kept on beside the new one for a slot or a list, the old copy
-    /// would not see what shaders write into the new one within a
-    /// submission.
+    /// title memory itself, or it is on the card already. One shaders may
+    /// write moves only when nothing else has it: kept on beside the new
+    /// one for a slot or a list, the old copy would not see what shaders
+    /// write into the new one within a submission (and with submissions in
+    /// flight, one of them may still be writing it back).
     pub fn copy_home(&self, u: &CopyUse, budget: &Budget, hot_frames: u64) -> CopyHome {
-        if u.in_place || u.on_card || u.flights || u.frames_in_a_row < hot_frames || (u.gpu_writable && !u.alone) {
+        if u.in_place || u.on_card || u.frames_in_a_row < hot_frames || (u.gpu_writable && !u.alone) {
             return CopyHome::Stay;
         }
         if u.bytes == 0 || self.promotable(budget) < u.bytes {
@@ -524,7 +525,12 @@ mod tests {
         assert_eq!(r.copy_home(&CopyUse { gpu_writable: true, alone: true, ..hot }, &at(50), 8), CopyHome::Card, "shaders write it, nothing else has it");
         assert_eq!(r.copy_home(&CopyUse { in_place: true, ..hot }, &at(50), 8), CopyHome::Stay, "title memory itself");
         assert_eq!(r.copy_home(&CopyUse { on_card: true, ..hot }, &at(50), 8), CopyHome::Stay, "there already");
-        assert_eq!(r.copy_home(&CopyUse { flights: true, ..hot }, &at(50), 8), CopyHome::Stay, "flights in the air");
+        assert_eq!(r.copy_home(&CopyUse { flights: true, ..hot }, &at(50), 8), CopyHome::Card, "read-only: flights write nothing back");
+        assert_eq!(
+            r.copy_home(&CopyUse { flights: true, gpu_writable: true, ..hot }, &at(50), 8),
+            CopyHome::Stay,
+            "writable and held, flights in the air"
+        );
         // Room up to 80 %: 29 GiB at 50 of 100 GiB, not 31.
         assert_eq!(r.copy_home(&CopyUse { bytes: 29 * GIB, ..hot }, &at(50), 8), CopyHome::Card);
         assert_eq!(r.copy_home(&CopyUse { bytes: 31 * GIB, ..hot }, &at(50), 8), CopyHome::Stay, "no room");
