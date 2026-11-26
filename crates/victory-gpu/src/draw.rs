@@ -2079,15 +2079,19 @@ impl State {
             // A slot that shows a copy a hot one replaced is made again
             // from the new one (`shadow::moved_up`): both are current
             // until then, so either is right for lists already recorded.
-            if crate::shadow::moved_any()
-                && let Some((copy, _, _)) = crate::descriptor::host::buffer_copy(&view)
-                && host.shows_replaced(index, &copy)
-                && let Some(again) = host.remake(index, handle)
-            {
-                crate::shadow::HOT_SLOTS.fetch_add(1, Ordering::Relaxed);
-                view = again;
+            // The copy found is the one `readable` brings up to date.
+            let mut found = None;
+            if crate::shadow::moved_any() {
+                found = crate::descriptor::host::buffer_copy(&view);
+                if let Some((copy, _, _)) = &found
+                    && host.shows_replaced(index, copy)
+                    && let Some(again) = host.remake(index, handle)
+                {
+                    crate::shadow::HOT_SLOTS.fetch_add(1, Ordering::Relaxed);
+                    view = again;
+                }
             }
-            readable(list, u.kind, &view);
+            readable_with(list, u.kind, &view, found);
             // Up to date by this draw: not the texture pass's to make.
             if crate::descriptor::host::is_texture_view(&view) {
                 host.texture_slot_tabled(index, true);
@@ -2831,12 +2835,24 @@ fn depth_state(texture: &ID3D12Resource, desc: Option<&D3D12_DEPTH_STENCIL_VIEW_
 }
 
 fn readable(list: &HostList, kind: ResourceType, view: &View) {
+    readable_with(list, kind, view, None);
+}
+
+/// [`readable`], with the view's host copy if the caller found it already
+/// (`crate::descriptor::host::buffer_copy` of the same view).
+fn readable_with(
+    list: &HostList,
+    kind: ResourceType,
+    view: &View,
+    found: Option<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)>,
+) {
     const UNORDERED_ACCESS: u32 = 0x8;
     let placed = crate::descriptor::host::placed_texture(view);
     let view = placed.as_ref().unwrap_or(view);
     // Buffer views read title memory: their range is copied at submission;
     // what shaders write through unordered access goes back to it after.
-    if let Some((shadow, address, len)) = crate::descriptor::host::buffer_copy(view) {
+    let found = if placed.is_some() { None } else { found };
+    if let Some((shadow, address, len)) = found.or_else(|| crate::descriptor::host::buffer_copy(view)) {
         shadow.refresh(list, address, len);
         list.buffer_state(
             &shadow.buffer,
