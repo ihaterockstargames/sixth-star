@@ -157,6 +157,15 @@ function Read-Run([string]$log) {
         $counted = @($frames | Select-Object -Last ([math]::Max(1, [int]($frames.Count * 2 / 3))))
     }
     $r.Counted = $counted.Count
+    # The frame time over the run, by 30 seconds from the first frame line:
+    # where loading and menus end and the scene begins.
+    $r.Series = ''
+    if ($first) {
+        $r.Series = (($frames | Where-Object { $_.T } | Group-Object { [int][math]::Floor(($_.T - $first).TotalSeconds / 30) } |
+                    Sort-Object { [int]$_.Name } | ForEach-Object {
+                        '{0}s {1:N0}' -f ([int]$_.Name * 30), (Get-Median (@($_.Group | ForEach-Object Ms)))
+                    }) -join ', ')
+    }
     $m = { param($p) Get-Median (@($counted | ForEach-Object { $_.$p })) }
     $r.Median = [ordered]@{
         Fps = & $m 'Fps'; Ms = & $m 'Ms'; Cpu = & $m 'Cpu'; CopyMs = & $m 'CopyMs'; CopyMb = & $m 'CopyMb'
@@ -233,6 +242,7 @@ function Write-Report($runs, [string]$path, $info) {
         $out.Add("## $($x.Name)")
         $out.Add('')
         $out.Add("- log: $($x.Run.Log)")
+        if ($x.Run.Series) { $out.Add("- ms/frame by 30 s from the first frame line: $($x.Run.Series)") }
         foreach ($p in @('Session', 'Startup', 'Residency', 'Memory', 'Cpu', 'FirstError')) {
             if ($x.Run.$p) { $out.Add("- last ${p}: ``$($x.Run.$p)``") }
         }
