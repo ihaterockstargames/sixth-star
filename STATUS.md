@@ -188,6 +188,13 @@ Task Manager figures were not taken for this run.
   the best synthetic frame to 16.5 ms. In `late_bench`, reading texture
   copies from the buffers' host copies (`VICTORY_TEXTURE_FROM_COPY=1`) took
   the frame from 70.6 to 24.7 ms, and to 18.1 ms with the late wait on top.
+- Synthetic A/B of `ab.bat`'s configurations (2026-11-26, `synthetic_ab`,
+  on this machine, **not the title**): the same switches as `ab.bat`, over
+  a game-shaped frame and texture streaming with submissions in flight,
+  3,000 and 6,000 frames each, every byte checked, memory flat. Median
+  (95th percentile) ms per frame: defaults 113.2 (121.3) and 63.6 (70.9);
+  `best` 16.9 (19.3) and 15.4 (17.8); `bestlate` 16.7 (19.5) and 12.4
+  (14.7). Whether the title gains the same is not measured.
 - Correctness tests added on 2026-11-26 (synthetic, on this machine, all
   passing):
   - differential tests: whatever host copy the GPU reads (the PC's memory,
