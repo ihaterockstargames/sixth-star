@@ -193,7 +193,14 @@ Task Manager figures were not taken for this run.
     new texture is still made (in the PC's memory) and nothing is refused;
     after the release the texture comes back to the card and hot copies
     move;
-  - submissions in flight in all six late-wait and relay modes.
+  - submissions in flight in all six late-wait and relay modes;
+  - soaks: 4,000 frames (32,000 submissions in flight) of texture copies
+    with hot copies under the late wait and the relay, and 1,500 frames
+    of the game-shaped frame: no device lost, the host's memory alive
+    flat (or shrinking as old copies are let go), every byte checked.
+- Texture promotion (default on) waits two frames after the new copy's
+  upload before a descriptor slot shows it (`94f5b63`): a list recorded
+  earlier and submitted later could otherwise have sampled it unfilled.
 - Synthetic, on this machine (not the title): 64 reads of a 2048x2048
   texture took 4.4 ms from the card and 41.1 ms from the PC's memory (9.3x);
   the card filled to 90% (6.08 of 6.72 GiB) placed a title-filled texture in
