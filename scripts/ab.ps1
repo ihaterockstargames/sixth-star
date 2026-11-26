@@ -13,9 +13,10 @@
 #   cardbuf1       VICTORY_CARD_BUFFERS_MIN_MB=1, VICTORY_CARD_BUFFERS_MB=1024
 #                  (buffer copies from 1 MiB on the card from the start; 4.5x
 #                  less copy-back in the synthetic copyback_bench)
-#   best           cardbuf1 and hot1024 together (the synthetic frame_bench:
-#                  140.8 -> 55.7 ms; writable copies on the card when made,
-#                  read-only ones moved by use)
+#   best           cardbuf1, hot1024 and texcopy together (synthetic: frame_bench
+#                  109 -> 16.5 ms, late_bench 70.6 -> 24.7 ms)
+#   texcopy        VICTORY_TEXTURE_FROM_COPY=1 (buffer-to-texture copies read
+#                  the buffer's host copy instead of a fresh upload)
 #   bestrelay      best with VICTORY_RELAY=1 (submissions in flight, copy-back
 #                  on its own thread; passes the flights tests on this machine)
 #   bestlate       best with VICTORY_LATE_WAIT=3
@@ -64,9 +65,10 @@ function Get-Overrides([string]$name) {
         '^nopromote$' { return [ordered]@{ VICTORY_PROMOTE = '0' } }
         '^nonote$' { return [ordered]@{ VICTORY_BACK_NOTE = '0' } }
         '^cardbuf(\d+)$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = $Matches[1]; VICTORY_CARD_BUFFERS_MB = '1024' } }
-        '^best$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024' } }
-        '^bestrelay$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_RELAY = '1' } }
-        '^bestlate$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_LATE_WAIT = '3' } }
+        '^best$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_TEXTURE_FROM_COPY = '1' } }
+        '^texcopy$' { return [ordered]@{ VICTORY_TEXTURE_FROM_COPY = '1' } }
+        '^bestrelay$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_TEXTURE_FROM_COPY = '1'; VICTORY_RELAY = '1' } }
+        '^bestlate$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_TEXTURE_FROM_COPY = '1'; VICTORY_LATE_WAIT = '3' } }
         '^wide$' { return [ordered]@{ VICTORY_WIDE_REFRESH = '1' } }
         '^keepsnap$' { return [ordered]@{ VICTORY_KEEP_SNAPSHOTS = '1' } }
         '^relay$' { return [ordered]@{ VICTORY_RELAY = '1' } }
@@ -300,7 +302,8 @@ try {
         # Every switch the configurations use is cleared first, so a
         # setting in run.config.bat does not leak into another configuration.
         foreach ($v in @('VICTORY_HOT_WINDOWS_MB', 'VICTORY_RESIDENCY', 'VICTORY_PROMOTE', 'VICTORY_RELAY', 'VICTORY_LATE_WAIT',
-                'VICTORY_CARD_BUFFERS_MIN_MB', 'VICTORY_CARD_BUFFERS_MB', 'VICTORY_WIDE_REFRESH', 'VICTORY_KEEP_SNAPSHOTS', 'VICTORY_BACK_NOTE')) {
+                'VICTORY_CARD_BUFFERS_MIN_MB', 'VICTORY_CARD_BUFFERS_MB', 'VICTORY_WIDE_REFRESH', 'VICTORY_KEEP_SNAPSHOTS', 'VICTORY_BACK_NOTE',
+                'VICTORY_TEXTURE_FROM_COPY')) {
             if (-not $over.Contains($v)) { $lines += "set `"$v=`"" }
         }
         foreach ($k in $over.Keys) { $lines += "set `"$k=$($over[$k])`"" }
