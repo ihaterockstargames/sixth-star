@@ -267,3 +267,20 @@ The legacy backend stays selectable until each phase's fixtures pass and the mai
 - That 40 FPS is reachable on an 8 GB RTX 3070. That depends on the title's own GPU time, which is unmeasured until Phase 0.
 - Any speed for the emulated ray traversal, AMD hardware, or VRAM eviction under the title's load: not measured.
 - That C1's cut is complete. Elements past the host copy still read 0 until the registry grows backings.
+
+## 7. Measured since: the engines on a synthetic frame (2026-11-26)
+
+`cargo run -p enginebench --release` models one frame with real operations on this machine (Ryzen 7 5800X): a 512 MiB write-watched title reservation, the CPU writing 32 MiB of it in scattered 4 KiB pages, shaders declared to write 64 MiB (or 174 MiB) of which they write 8 MiB, and the CPU reading part of what they wrote. GPU work is not timed; only the CPU work around it is. Medians of 25 frames, three runs, which agreed within about 10%:
+
+| Workload | Inherited engine | Timeline, guarded | Timeline, unguarded (blind copy) |
+|---|---|---|---|
+| intro-like: 64 MiB declared, 8 MiB written, 256 KiB read by the CPU | 13.2–14.3 ms | 4.6–4.8 ms | 21.7–22.7 ms |
+| 174 MiB declared, 8 MiB written | 25.3–28.4 ms | 4.5–4.8 ms | 51.0–52.8 ms |
+| CPU reads 10% of what shaders wrote | 12.8–14.1 ms | 4.8–5.0 ms | 21.6–22.5 ms |
+| CPU reads all of it | 13.4–14.2 ms | 7.5–8.5 ms | 22.2–22.7 ms |
+
+What it shows:
+
+1. **With guards the timeline removes 37–84% of this CPU work** (37–47% when the CPU reads everything shaders wrote, 64–84% otherwise). Bringing the GPU's writes back drops from 5.7–13.9 ms to 0.1–0.3 ms when the CPU reads little of them, and the snapshot (3.3–9.9 ms) disappears. What is left is mostly copying the CPU's own 32 MiB up (3.0–3.6 ms in both engines), which only a smaller CPU-written region or direct writes into the upload heap (D5b) reduce.
+2. **Without guards, copying the declared writes back blindly is three to four times slower than the inherited compare.** The conservative path for unguarded memory therefore stays the inherited snapshot-and-compare. `sixth_memory::timeline::Retired::fetch_now` says so. The gain depends on guarding GPU-written memory, which makes the guard (fault-driven demand fetch, D4) the first thing to build in the runner, not an option.
+3. **The inherited algorithm at ideal speed costs 13–28 ms; the maintainer's gameplay frame spends 82.3 ms preparing and 44.7 ms copying back.** Most of the real cost is therefore not the algorithm but what surrounds it: kernel calls per range, many small write-watch askings, guards and page protections, whole-texture hashes, heap passes, card copies, several submissions per frame. The CPU profiler now in the build (`cpuprof`) names those shares in the next run. This is a model with chosen parameters, not a frame-rate prediction.
