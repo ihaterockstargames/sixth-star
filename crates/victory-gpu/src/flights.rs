@@ -1354,3 +1354,91 @@ fn writes_back_and_title_writes_both_reach_whichever_copy_is_read() {
     assert!(crate::shadow::BACK_NOTED.load(std::sync::atomic::Ordering::Relaxed) > noted_before, "pages were noted");
     assert!(checked > 0);
 }
+
+/// Memory pressure: the card filled past its target must not make anything
+/// missing. With the card past nine tenths of its budget: a texture the
+/// title fills is still made (in the PC's memory), hot copies do not move
+/// up, and every copy still reads as title memory; once the filler goes,
+/// the texture comes back to the card and the hot copies move. Ignored:
+/// filling the card would change what other tests running beside it see.
+/// Run with `cargo test -p victory-gpu --release --lib pressure_stress -- --ignored --nocapture`.
+#[test]
+#[ignore = "fills the card's memory"]
+fn pressure_stress() {
+    let Some(host) = crate::host::host() else {
+        return;
+    };
+    let share = || {
+        let b = crate::residency::budget().expect("a budget");
+        (b.local_used as f64 / b.local_budget as f64, b.local_used >> 20, b.local_budget >> 20)
+    };
+    let (before, used, budget) = share();
+    println!("before: {:.0}% of the budget ({used} of {budget} MiB)", before * 100.0);
+    // Filler on the card until past the target (90%), in 64 MiB pieces.
+    let mut filler = Vec::new();
+    while share().0 < 0.93 {
+        let Some(b) = host.uav_buffer(64 << 20) else {
+            break;
+        };
+        filler.push(b);
+        assert!(filler.len() < 400, "the card never filled");
+    }
+    let (full, used, _) = share();
+    let (need, pressure) = crate::residency::need();
+    println!("filled: {:.0}% ({used} MiB, {} pieces), pressure {pressure:?}, {} MiB to give up", full * 100.0, filler.len(), need >> 20);
+    assert!(pressure >= sixth_memory::residency::Pressure::High);
+    // A texture the title fills: made, in the PC's memory.
+    let texture = crate::resource::tests::placed_rgba();
+    let first = crate::resource::host_resource(texture).expect("made under pressure, not refused").clone();
+    assert!(crate::residency::in_system(&first), "in the PC's memory while the card is full");
+    // Hot copies do not move up while the card is full.
+    const LEN: usize = 4 << 20;
+    // SAFETY: a fresh write-watched reservation of our own, never freed.
+    let region = unsafe {
+        windows_sys::Win32::System::Memory::VirtualAlloc(
+            std::ptr::null(),
+            8 * LEN,
+            windows_sys::Win32::System::Memory::MEM_RESERVE | windows_sys::Win32::System::Memory::MEM_COMMIT | 0x20_0000,
+            windows_sys::Win32::System::Memory::PAGE_READWRITE,
+        )
+    } as u64;
+    let buffers: Vec<(This, u64)> = (0..8u64)
+        .map(|i| {
+            let at = region + i * LEN as u64;
+            (crate::resource::tests::title_buffer_at(at, LEN as u64), at)
+        })
+        .collect();
+    for f in 0..12 {
+        crate::shadow::test_hot(Some(256), Some(800_000 + f));
+        for b in &buffers {
+            let copy = crate::shadow::find(b.1, LEN as u64).expect("a copy");
+            assert!(!copy.carded(), "frame {f}: a hot copy moved up with the card full");
+        }
+    }
+    // The filler goes; the pressure comes down.
+    drop(filler);
+    let began = std::time::Instant::now();
+    while crate::residency::need().1 >= sixth_memory::residency::Pressure::High {
+        assert!(began.elapsed().as_secs() < 10, "the pressure stayed high");
+        std::thread::yield_now();
+    }
+    let (after, used, _) = share();
+    println!("released: {:.0}% ({used} MiB), pressure {:?}", after * 100.0, crate::residency::need().1);
+    // The texture comes back to the card.
+    assert!(crate::resource::promote_idle(0, 0) >= 1, "given up in the PC's memory");
+    let back = crate::resource::host_resource(texture).expect("made again").clone();
+    assert!(!crate::residency::in_system(&back), "back on the card");
+    // The hot copies move now.
+    let mut moved = 0;
+    for f in 12..24 {
+        crate::shadow::test_hot(Some(256), Some(800_000 + f));
+        moved = buffers
+            .iter()
+            .filter(|b| crate::shadow::find(b.1, LEN as u64).is_some_and(|c| c.carded()))
+            .count();
+    }
+    crate::shadow::test_hot(None, None);
+    println!("hot copies on the card after the release: {moved} of {}", buffers.len());
+    assert_eq!(moved, buffers.len());
+    assert_eq!(crate::descriptor::host::device_removed(), None);
+}
