@@ -340,6 +340,10 @@ $OutDir = (Resolve-Path $OutDir).Path
 $wrapper = Join-Path $configDir 'run.config.ab.bat'
 Write-Host "[ab] settings  $Config (not changed)"
 Write-Host "[ab] logs      $OutDir"
+foreach ($pair in @(@('CACHE_DIR', 'victory-cache'), @('DATA_DIR', 'victory-data'))) {
+    $folder = Join-Path $configDir $pair[1]
+    if (Test-Path $folder) { Write-Host "[ab] $($pair[0].ToLower().PadRight(9)) $folder (unless the settings name another)" }
+}
 Write-Host "[ab] runs      $($Configs -join ', '), $Seconds s each, counting from $SkipSeconds s after the first frame line"
 Write-Host '[ab] each run: get into the same scene and stay there; the run stops by itself.'
 if ($DryRun) {
@@ -361,6 +365,16 @@ try {
         $dir = Join-Path $OutDir $name
         $null = New-Item -ItemType Directory -Force $dir
         $lines = @('@echo off', "rem Written by scripts\ab.ps1 for one run; deleted afterwards.", "call `"$Config`"", "set `"LOG_DIR=$dir`"")
+        # The caches and the title's data where the maintainer's own runs
+        # keep them: a victory-cache / victory-data folder next to the
+        # settings file, unless the settings name others. Without them the
+        # runs fell back to the default on C:, an empty shader cache: every
+        # shader translated and every pipeline built again, draws skipped
+        # meanwhile (frames of seconds, a black picture), in every config.
+        foreach ($pair in @(@('CACHE_DIR', 'victory-cache'), @('DATA_DIR', 'victory-data'))) {
+            $folder = Join-Path $configDir $pair[1]
+            if (Test-Path $folder) { $lines += "if not defined $($pair[0]) set `"$($pair[0])=$folder`"" }
+        }
         # Every switch the configurations use is cleared first, so a
         # setting in run.config.bat does not leak into another configuration.
         foreach ($v in @('VICTORY_HOT_WINDOWS_MB', 'VICTORY_RESIDENCY', 'VICTORY_PROMOTE', 'VICTORY_RELAY', 'VICTORY_LATE_WAIT',
