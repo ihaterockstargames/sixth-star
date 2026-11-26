@@ -35,6 +35,7 @@ minutes or more without a crash; that has not been reached or measured.
 | CPU | AMD Ryzen 7 5800X |
 | OS | Windows 11 Pro 26100, UEFI |
 | Resizable BAR | enabled (BAR1 8192 MiB / VRAM 8192 MiB) |
+| VRAM budget for the process | 7.08 GiB (what Windows gives the process; read from the device on 2026-11-26) |
 | Output | 1920x1080 |
 
 ## Settings
@@ -121,8 +122,10 @@ Task Manager figures were not taken for this run.
   the busy span against the time waited for the fence), CPU time by kind of
   work and by thread, copy-back and refresh bytes by the console's memory
   kind, and `INCOMPLETE FRAMES` whenever draws were not run; and once, a
-  `startup:` line at the first present. None of them adds a wait. The next
-  measurement on this page comes from them.
+  `startup:` line at the first present. From `7868402` on, also the VRAM in
+  use against that budget, texture copies refused for lack of room, and how
+  many cores the process and the submitting thread keep busy. None of them
+  adds a wait. The next measurement on this page comes from them.
 - The runner's frame line (logged every few seconds) splits each frame into
   time spent preparing submissions on the CPU and time on the GPU. In the
   intro cutscene the CPU side is more than twice the GPU side; see "Where the
