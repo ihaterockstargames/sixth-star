@@ -199,6 +199,13 @@ function Write-Report($runs, [string]$path, $info) {
         @('Frame lines counted (of all)', { param($x) "$($x.Run.Counted) of $($x.Run.FrameLines)" }),
         @('FPS', { param($x) F $x.Run.Median.Fps '{0:N2}' }),
         @('ms/frame', { param($x) F $x.Run.Median.Ms }),
+        @('  against the first configuration', { param($x)
+                $base = $runs[0].Run.Median.Ms
+                $ms = $x.Run.Median.Ms
+                if ($null -eq $base -or $null -eq $ms -or $base -eq 0) { 'n/a' }
+                elseif ($x -eq $runs[0]) { '(the reference)' }
+                else { '{0:+0;-0}% ({1:N2}x the FPS)' -f (($ms - $base) / $base * 100), ($base / $ms) }
+            }),
         @('worst frame line, ms/frame', { param($x) F $x.Run.WorstMs }),
         @('CPU preparing, ms', { param($x) F $x.Run.Median.Cpu }),
         @('  of it copies, ms (MB)', { param($x) "$(F $x.Run.Median.CopyMs) ($(F $x.Run.Median.CopyMb))" }),
