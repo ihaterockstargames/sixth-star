@@ -72,6 +72,7 @@ const AHEAD_MAX: usize = (1 << 30) / PAGE;
 /// 456 ms, in run 14). Ranges that are not write-watched, or lie alone, are
 /// left to `writes`.
 pub(crate) fn ask_ahead(ranges: &[(usize, usize)]) {
+    let _cpu = crate::cpuprof::timed(crate::cpuprof::Work::WriteWatch);
     let mut pieces: Vec<(usize, usize)> = ranges
         .iter()
         .filter(|r| r.0 < r.1)
@@ -169,6 +170,7 @@ pub(crate) fn once() -> bool {
 /// refresh) as [`ask_ahead`] does, and lets that asking stand until
 /// [`ask_once_end`].
 pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
+    let _cpu = crate::cpuprof::timed(crate::cpuprof::Work::WriteWatch);
     if !once() {
         return;
     }
@@ -301,6 +303,7 @@ pub(crate) fn asked(start: usize, end: usize) -> Option<(u64, Vec<(usize, u64)>)
 /// kernel just reported. `None` if the memory is not write-watched (nor,
 /// with `guarded`, view memory, which is then guarded).
 pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Vec<(usize, u64)>)> {
+    let _cpu = crate::cpuprof::timed(crate::cpuprof::Work::WriteWatch);
     use windows_sys::Win32::System::Memory::GetWriteWatch;
     const WRITE_WATCH_FLAG_RESET: u32 = 1;
     let (first, last) = (start / PAGE, end.div_ceil(PAGE));
@@ -510,6 +513,7 @@ fn is_view(start: usize, end: usize) -> bool {
 /// block by block if they span views, leaving out any that fail, and
 /// noting those not committed (unmapped) absent.
 fn protect(g: &mut Guards, from: usize, to: usize) {
+    let _cpu = crate::cpuprof::timed(crate::cpuprof::Work::Guards);
     use windows_sys::Win32::System::Memory::{PAGE_READONLY, VirtualProtect};
     let set = |from: usize, to: usize| {
         let mut old = 0;
@@ -580,6 +584,7 @@ fn open(g: &mut Guards, start: usize, end: usize) -> bool {
 /// The runtime calls it (as `kernel_will_write`) before the title's kernel
 /// reads into its own memory.
 pub fn writing(at: usize, len: usize) {
+    let _cpu = crate::cpuprof::timed(crate::cpuprof::Work::Guards);
     // The length is the title's (`fread`'s size times count, saturated).
     open(&mut guards(), at, at.saturating_add(len));
     // A placed texture there changes with no descriptor written.

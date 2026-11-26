@@ -30,6 +30,8 @@ pub mod ffx;
 pub mod fence;
 pub mod frame;
 #[cfg(windows)]
+mod cpuprof;
+#[cfg(windows)]
 mod gpuprof;
 #[cfg(windows)]
 mod watchdog;

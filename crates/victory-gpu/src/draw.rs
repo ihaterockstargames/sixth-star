@@ -1366,6 +1366,7 @@ impl State {
     /// copy. A list refreshes them where it first runs such a shader;
     /// title writes recorded later in the same list are not seen.
     fn heap_buffers(&self, list: &HostList) -> Option<u64> {
+        let _cpu = crate::cpuprof::timed(crate::cpuprof::Work::Descriptors);
         let heap = self
             .heaps
             .iter()
@@ -1539,6 +1540,7 @@ impl State {
         heap: &crate::descriptor::Heap,
         host: &crate::descriptor::host::HostHeap,
     ) {
+        let _cpu = crate::cpuprof::timed(crate::cpuprof::Work::Descriptors);
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if !*ON.get_or_init(|| std::env::var_os("VICTORY_HEAP_TEXTURES").is_none_or(|v| v != "0")) {
             return;
@@ -1833,6 +1835,7 @@ impl State {
 
     /// Runs a dispatch on the host.
     pub(crate) fn dispatch(&mut self, list: &HostList, x: u32, y: u32, z: u32) {
+        let _cpu = crate::cpuprof::timed(crate::cpuprof::Work::Recording);
         // It may write the arguments a window holds clamped.
         self.window = None;
         #[cfg(windows)]
@@ -1986,6 +1989,7 @@ impl State {
     /// Runs a mesh dispatch of `x` groups on the host (the title's mesh
     /// programs are one-dimensional).
     pub(crate) fn dispatch_mesh(&mut self, list: &HostList, x: u32) {
+        let _cpu = crate::cpuprof::timed(crate::cpuprof::Work::Recording);
         self.window = None;
         #[cfg(feature = "diagnostics")]
         self.trace("mesh", x, 0);
@@ -2310,6 +2314,7 @@ impl State {
         first: u32,
         first_instance: u32,
     ) {
+        let _cpu = crate::cpuprof::timed(crate::cpuprof::Work::Recording);
         self.window = None;
         #[cfg(feature = "diagnostics")]
         self.trace("draw", vertices, first);
@@ -2416,6 +2421,7 @@ impl State {
         base: i32,
         first_instance: u32,
     ) {
+        let _cpu = crate::cpuprof::timed(crate::cpuprof::Work::Recording);
         self.window = None;
         #[cfg(feature = "diagnostics")]
         self.trace("indexed", indices, first);
@@ -2459,6 +2465,7 @@ impl State {
         arguments: u64,
         count: Option<u64>,
     ) -> bool {
+        let _cpu = crate::cpuprof::timed(crate::cpuprof::Work::Recording);
         // Skip before the argument clamp can mutate the indirect buffer.
         #[cfg(windows)]
         if crate::pipeline::is_skipped(self.pipeline as This) {

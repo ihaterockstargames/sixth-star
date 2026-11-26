@@ -187,6 +187,7 @@ pub(crate) fn references(object: &impl Interface) -> u32 {
 /// host copies of textures the title fills).
 /// `VICTORY_SWEEP=0` keeps everything, as before.
 fn sweep() {
+    let _cpu = crate::cpuprof::timed(crate::cpuprof::Work::Upkeep);
     // The in-place probe and census, if asked for (`VICTORY_INPLACE_PROBE`).
     crate::inplace::tick();
     static ON: OnceLock<bool> = OnceLock::new();
@@ -3167,6 +3168,7 @@ fn read_backs(list: &HostList) {
 /// After the card ran what declared `back`: what shaders wrote there goes
 /// into title memory, and the ranges are done with.
 fn hand_back(back: &[Declared]) {
+    let _cpu = crate::cpuprof::timed(crate::cpuprof::Work::CopyBack);
     if crate::shadow::wide_back() {
         // Every range first (the pieces that differ, found on several
         // threads), then the merges, in order, as below.
@@ -4045,6 +4047,7 @@ impl Host {
         submitted: &mut u64,
         seen: &mut std::collections::HashSet<(usize, usize, usize)>,
     ) {
+        let _cpu = crate::cpuprof::timed(crate::cpuprof::Work::CopyBack);
         if plan.ranges.is_empty() {
             return;
         }
@@ -6738,6 +6741,9 @@ impl Meter {
         late_line(frames);
         card_clock_line(frames, ms);
         if let Some(line) = crate::gpuprof::line(frames) {
+            tracing::info!("{line}");
+        }
+        if let Some(line) = crate::cpuprof::line(frames) {
             tracing::info!("{line}");
         }
         let incomplete = crate::draw::drop_line(frames);
