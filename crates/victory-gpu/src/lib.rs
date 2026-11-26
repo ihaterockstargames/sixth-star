@@ -34,6 +34,8 @@ mod gpuprof;
 #[cfg(windows)]
 mod watchdog;
 #[cfg(windows)]
+mod session;
+#[cfg(windows)]
 mod host;
 #[cfg(windows)]
 mod indirect;

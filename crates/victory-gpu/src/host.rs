@@ -376,6 +376,30 @@ pub(crate) fn hold_report_locks_for_test() -> std::sync::MutexGuard<'static, std
     TRAIL.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The host GPU and its driver, for the session line: the adapter's name
+/// and its user-mode driver version (`a.b.c.d`).
+pub(crate) fn adapter_text() -> String {
+    let Some(adapter) = host().and_then(|h| h.adapter.as_ref()) else {
+        return "GPU unknown".into();
+    };
+    // SAFETY: plain adapter queries.
+    let (desc, umd) = unsafe { (adapter.GetDesc1(), adapter.CheckInterfaceSupport(&IDXGIDevice::IID)) };
+    let name = desc.map_or_else(
+        |_| "unknown".to_owned(),
+        |d| {
+            let end = d.Description.iter().position(|&c| c == 0).unwrap_or(d.Description.len());
+            String::from_utf16_lossy(&d.Description[..end])
+        },
+    );
+    match umd {
+        Ok(v) => {
+            let v = v as u64;
+            format!("GPU {name}, driver {}.{}.{}.{}", v >> 48, (v >> 32) & 0xffff, (v >> 16) & 0xffff, v & 0xffff)
+        }
+        Err(_) => format!("GPU {name}, driver unknown"),
+    }
+}
+
 /// Says [`removal_context`] in the log, once: called by whoever finds the
 /// host device removed.
 pub(crate) fn log_removal_context() {
@@ -6716,7 +6740,9 @@ impl Meter {
         if let Some(line) = crate::gpuprof::line(frames) {
             tracing::info!("{line}");
         }
-        if let Some(line) = crate::draw::drop_line(frames) {
+        let incomplete = crate::draw::drop_line(frames);
+        crate::session::window(frames, elapsed.as_secs_f64(), incomplete.is_some());
+        if let Some(line) = incomplete {
             tracing::warn!("{line}");
         }
         crate::shadow::back_line(frames);

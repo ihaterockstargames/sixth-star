@@ -21,7 +21,9 @@ fn seconds() -> u64 {
 
 /// A present happened. Starts the watchdog's thread at the first one.
 pub(crate) fn presented() {
-    LAST.store(crate::host::now_us(), Ordering::Relaxed);
+    let now = crate::host::now_us();
+    let before = LAST.swap(now, Ordering::Relaxed);
+    crate::session::presented(now, if before == 0 { 0 } else { now.saturating_sub(before) });
     PRESENTS.fetch_add(1, Ordering::Relaxed);
     static START: std::sync::Once = std::sync::Once::new();
     if seconds() == 0 {
@@ -62,9 +64,10 @@ fn watch() {
 /// What the report says (also for tests): nothing in it waits.
 pub(crate) fn report(idle_us: u64) -> String {
     format!(
-        "nothing presented for {:.1} s (after {} presents). {}. {}. {}. Pipelines being made: {}.",
+        "nothing presented for {:.1} s (after {} presents, {:.1} s after the first). {}. {}. {}. Pipelines being made: {}.",
         idle_us as f64 / 1e6,
         PRESENTS.load(Ordering::Relaxed),
+        crate::session::running_s(crate::host::now_us()),
         crate::host::submission_report(),
         crate::queue::held_report(),
         crate::fence::waits_report().unwrap_or_else(|| "title fence waits: (busy)".into()),
