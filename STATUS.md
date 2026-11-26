@@ -1,6 +1,6 @@
 # Sixth Star — test status
 
-Last updated: 2026-11-26 (overnight)
+Last updated: 2026-11-26 (evening)
 Build: current main
 Binary: sixth-star.exe
 
@@ -17,7 +17,7 @@ titles. No game files are included; the user supplies their own dump.
 | Intro cutscene | 21.5–23.0 FPS (43.6–46.5 ms/frame), measured by the maintainer from the runner's frame line on 2026-11-26 |
 | What limits it | in gameplay, **the serial path**: CPU preparing, waiting for the GPU and copying back follow one another (see below); in the intro cutscene, the CPU |
 | Stability | in the maintainer's latest session on 2026-11-26 the title ran without a crash; the session's length was not recorded. An earlier run that day froze in the intro cutscene. From the next build the runner logs the exact session length every minute (see Notes) |
-| Picture | experimental: flickering, missing character textures (observed by the maintainer) |
+| Picture | experimental: flickering, missing character textures (observed by the maintainer). From `009dd7a` textures that found no room on the card are made in the PC's memory instead of being left out; whether that fixes the missing textures is not measured yet |
 | Output | 1920x1080 |
 | Resizable BAR | enabled |
 | DirectStorage / BCPack | console DirectStorage HLE active; BCPack tables found |
@@ -35,7 +35,7 @@ minutes or more without a crash; that has not been reached or measured.
 | CPU | AMD Ryzen 7 5800X |
 | OS | Windows 11 Pro 26100, UEFI |
 | Resizable BAR | enabled (BAR1 8192 MiB / VRAM 8192 MiB) |
-| VRAM budget for the process | 7.08 GiB (what Windows gives the process; read from the device on 2026-11-26) |
+| VRAM budget for the process | 7.08 GiB (what Windows gives the process; read from the device on 2026-11-26); 6.72 GiB later that day with other programs open: it depends on what else runs |
 | Output | 1920x1080 |
 
 ## Settings
@@ -52,6 +52,12 @@ minutes or more without a crash; that has not been reached or measured.
 - Other non-default settings: `DRED=1` (more detail on a device removal; a
   little slower). `CONSOLE=series-x`, `PRESET=safe`, `SHADER_OPT=0` are the
   defaults.
+- Texture residency (since `009dd7a`, default on): past nine tenths of the
+  VRAM budget, idle textures are given up first and new textures the title
+  fills go to the PC's memory, which the GPU reads about 9x slower (synthetic
+  measurement below) but which shows them; render targets stay on the card.
+  `VICTORY_RESIDENCY=0` restores the old rule (such textures were not made
+  while the card was full). Every measurement above predates it.
 - A local pipeline skip list was active in every 2026-11-26 measurement (see
   Notes). Every figure on this page is from this machine with these
   settings.
@@ -130,6 +136,16 @@ Task Manager figures were not taken for this run.
   use against that budget, texture copies refused for lack of room, and how
   many cores the process and the submitting thread keep busy. None of them
   adds a wait. The next measurement on this page comes from them.
+- From `009dd7a` on, two more lines: `host memory alive` (every host
+  resource alive now, by what it is for and whether it is on the card or in
+  the PC's memory, from the device's own destruction notices) and
+  `residency:` (pressure, textures made in the PC's memory, idle textures
+  given up, passes with no room in either pool). See
+  `docs/adr/0003-residency.md`.
+- Synthetic, on this machine (not the title): 64 reads of a 2048x2048
+  texture took 4.4 ms from the card and 41.1 ms from the PC's memory (9.3x);
+  the card filled to 90% (6.08 of 6.72 GiB) placed a title-filled texture in
+  the PC's memory and a render target on the card, both read back exactly.
 - The runner's frame line (logged every few seconds) splits each frame into
   time spent preparing submissions on the CPU and time on the GPU. In the
   intro cutscene the CPU side is more than twice the GPU side; see "Where the
