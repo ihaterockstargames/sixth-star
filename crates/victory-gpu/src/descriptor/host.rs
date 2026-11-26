@@ -1620,6 +1620,26 @@ impl HostHeap {
         Some(view)
     }
 
+    /// Whether host slot `index` shows a host copy of title texture
+    /// `texture` that `crate::resource::promote` gave up: it is to be made
+    /// again from the texture's new copy ([`HostHeap::remake`]).
+    pub(crate) fn shows_stale(&self, index: u32, texture: crate::object::This) -> bool {
+        let kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
+        kept.get(index as usize)
+            .and_then(Option::as_ref)
+            .is_some_and(|shown| crate::resource::shows_stale(texture, shown))
+    }
+
+    /// Makes slot `index` again from the title's view at `handle`, as if
+    /// the title had written it: what it showed is let go once the
+    /// submissions running now are done ([`HostHeap::keep`]).
+    pub(crate) fn remake(&self, index: u32, handle: u64) -> Option<View> {
+        if let Some(made) = self.made.lock().unwrap_or_else(|e| e.into_inner()).get_mut(index as usize) {
+            *made = 0;
+        }
+        self.mirror(index, handle, true)
+    }
+
     /// Whether host slot `index` shows `buffer`; `None` if it shows no
     /// resource (diagnostics: a buffer view's slot must show the host copy
     /// that is brought up to date for it).
@@ -2898,6 +2918,49 @@ mod tests {
         // A wider texture written at the same address: slot 1 is stale.
         assert_eq!(heap.note_buffer(2, Some(&view(at, 128)), false), [1]);
         assert_eq!(slots(u64::MAX), [2]);
+    }
+
+    /// A slot that shows a texture's copy in the PC's memory, which
+    /// `resource::promote` gave up for one on the card, is made again from
+    /// the new copy and holds it; until then it holds the old one.
+    #[test]
+    fn a_slot_showing_a_copy_given_up_is_made_again_from_the_new_one() {
+        let _one = REMAPPED_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let _promote = crate::resource::tests::PROMOTE_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(heap) = HostHeap::new(false, 8) else {
+            return; // no host GPU
+        };
+        let this = crate::resource::tests::placed_rgba();
+        // The title's descriptor: a 2D shader view of mip 0, one mip (the
+        // union starts at word 4, on 8 bytes).
+        let mut record = [0u32; 8];
+        let handle = record.as_mut_ptr() as u64;
+        let desc: [u32; 10] = [28, 4, 0x1688, 0, 0, 1, 0, 0, 0, 0];
+        crate::descriptor::create_srv(std::ptr::null(), this, &desc, handle);
+        let shown = |heap: &HostHeap| heap.kept.lock().unwrap()[1].clone().expect("the slot holds a resource");
+        {
+            let _system = crate::residency::force_system();
+            assert!(heap.mirror(1, handle, true).is_some());
+        }
+        let old = shown(&heap);
+        assert!(crate::residency::in_system(&old));
+        assert!(!heap.shows_stale(1, this));
+        assert!(crate::resource::promote_idle(0, 0) >= 1);
+        // The slot still holds the old copy, alive; the next use makes the
+        // new one on the card.
+        assert_eq!(windows::core::Interface::as_raw(&shown(&heap)), windows::core::Interface::as_raw(&old));
+        let new = crate::resource::host_resource(this).expect("made again").clone();
+        assert!(!crate::residency::in_system(&new));
+        assert!(heap.shows_stale(1, this));
+        // Made again: the slot shows the copy on the card.
+        assert!(heap.remake(1, handle).is_some());
+        assert_eq!(windows::core::Interface::as_raw(&shown(&heap)), windows::core::Interface::as_raw(&new));
+        assert!(!heap.shows_stale(1, this));
+        // A mirror of the same view later leaves it as it is.
+        assert!(heap.mirror(1, handle, true).is_some());
+        assert_eq!(windows::core::Interface::as_raw(&shown(&heap)), windows::core::Interface::as_raw(&new));
+        assert_eq!(device_removed(), None);
+        REMAPPED.lock().unwrap().clear();
     }
 
     /// The tests that take [`REMAPPED`] and [`OVERFLOWED`], one at a time.

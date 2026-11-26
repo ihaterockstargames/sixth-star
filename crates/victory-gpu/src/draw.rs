@@ -1590,6 +1590,10 @@ impl State {
                 once!("textures picked by index: no room on the card nor in the PC's shared memory; they wait");
             }
         }
+        // With room again: copies made in the PC's memory come back.
+        if room && crate::residency::on() {
+            crate::resource::promote();
+        }
         let mut refused = 0;
         // Slots whose texture's memory the runtime mapped, unmapped or
         // wrote since the last pass are due again.
@@ -1746,6 +1750,14 @@ impl State {
                 // a render target, a depth or unordered access texture: the host's own
                 host.texture_slot_done(index, write, None);
                 continue;
+            }
+            // A slot that shows a copy in the PC's memory given up for one on
+            // the card (`resource::promote`) is made again from the new one.
+            if host.shows_stale(index, resource)
+                && let Some(handle) = heap.handle(index)
+            {
+                host.remake(index, handle);
+                crate::residency::SLOTS_REMADE.fetch_add(1, Ordering::Relaxed);
             }
             // A texture that has a staging buffer now is one draws read
             // through a table: they upload it, and check it at every

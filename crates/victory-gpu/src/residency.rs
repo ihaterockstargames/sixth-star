@@ -35,6 +35,13 @@ pub(crate) fn on() -> bool {
 pub(crate) static TEXTURES_IN_SYSTEM: AtomicU64 = AtomicU64::new(0);
 pub(crate) static RECLAIMED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 pub(crate) static REFUSED: AtomicU64 = AtomicU64::new(0);
+/// Since the start: host textures in the PC's memory given up to be made
+/// again on the card once it had room (`crate::resource::promote`), and
+/// their bytes.
+pub(crate) static PROMOTED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+/// Since the start: descriptor slots made again because they showed such a
+/// copy.
+pub(crate) static SLOTS_REMADE: AtomicU64 = AtomicU64::new(0);
 
 fn with<R>(f: impl FnOnce(&mut Residency) -> R) -> R {
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -64,9 +71,34 @@ pub(crate) fn need() -> (u64, Pressure) {
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: textures this thread makes that may go to the PC's memory go
+    /// there ([`force_system`]).
+    static FORCED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tests: until the guard goes, textures this thread makes that may go to
+/// the PC's memory go there, whatever the card's budget.
+#[cfg(test)]
+pub(crate) fn force_system() -> impl Drop {
+    struct Forced;
+    impl Drop for Forced {
+        fn drop(&mut self) {
+            FORCED.with(|f| f.set(false));
+        }
+    }
+    FORCED.with(|f| f.set(true));
+    Forced
+}
+
 /// Where a new host texture of `bytes` (allocated) goes: `class` from what
 /// the GPU does with it.
 pub(crate) fn place(class: Class, bytes: u64) -> Placement {
+    #[cfg(test)]
+    if class != Class::Written && FORCED.with(std::cell::Cell::get) {
+        return Placement::System;
+    }
     let Some(b) = budget() else {
         return Placement::Local;
     };
@@ -96,6 +128,39 @@ pub(crate) fn evict(need: u64, candidates: &[sixth_memory::residency::Candidate]
     with(|r| r.evict(need, candidates, frame, u64::MAX))
 }
 
+/// The bytes that may come back to the card from the PC's memory now
+/// (`sixth_memory::residency::Residency::promotable`).
+pub(crate) fn promotable() -> u64 {
+    let Some(b) = budget() else {
+        return 0;
+    };
+    with(|r| {
+        r.observe(&b);
+        r.promotable(&b)
+    })
+}
+
+/// Which of `candidates` (host textures in the PC's memory) to make again
+/// on the card now.
+pub(crate) fn promote(candidates: &[sixth_memory::residency::Candidate]) -> Vec<usize> {
+    let Some(b) = budget() else {
+        return Vec::new();
+    };
+    with(|r| {
+        r.observe(&b);
+        r.promote(candidates, &b)
+    })
+}
+
+/// Whether `resource` was made in the PC's memory (a custom heap whose
+/// pool is the system's), by what the device says of it.
+pub(crate) fn in_system(resource: &ID3D12Resource) -> bool {
+    let mut properties = D3D12_HEAP_PROPERTIES::default();
+    // SAFETY: a live committed resource; the out-pointer is ours.
+    let asked = unsafe { resource.GetHeapProperties(Some(&mut properties), None) };
+    asked.is_ok() && properties.Type == D3D12_HEAP_TYPE_CUSTOM && properties.MemoryPoolPreference == D3D12_MEMORY_POOL_L0
+}
+
 /// The heap a host texture of the given placement is made in: the card's
 /// default heap, or the PC's memory, GPU access only (custom heap, pool L0,
 /// no CPU page).
@@ -116,24 +181,28 @@ pub(crate) fn texture_heap(placement: Placement) -> D3D12_HEAP_PROPERTIES {
 
 /// For the frame line, since the last call.
 pub(crate) fn line() -> Option<String> {
-    static LAST: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+    static LAST: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
     let now = [
         TEXTURES_IN_SYSTEM.load(Relaxed),
         RECLAIMED[0].load(Relaxed),
         RECLAIMED[1].load(Relaxed),
         REFUSED.load(Relaxed),
+        PROMOTED[0].load(Relaxed),
+        PROMOTED[1].load(Relaxed),
     ];
     let d: Vec<u64> = now.iter().zip(&LAST).map(|(n, l)| n - l.swap(*n, Relaxed)).collect();
     let pressure = with(|r| r.pressure());
     let [alive, _, bytes] = crate::ledger::alive(crate::ledger::Cat::Texture, crate::ledger::Pool::System);
     Some(format!(
         "residency: pressure {pressure:?}; since the last line {} textures made in the PC's memory for lack of room on the card \
-         ({} since the start, {alive} alive, {:.0} MiB), {} idle textures given up ({:.0} MiB), {} texture passes with no room in either pool",
+         ({} since the start, {alive} alive, {:.0} MiB), {} idle textures given up ({:.0} MiB), {} back on the card ({:.0} MiB), {} texture passes with no room in either pool",
         d[0],
         now[0],
         bytes as f64 / f64::from(1u32 << 20),
         d[1],
         d[2] as f64 / f64::from(1u32 << 20),
+        d[4],
+        d[5] as f64 / f64::from(1u32 << 20),
         d[3]
     ))
 }

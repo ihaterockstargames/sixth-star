@@ -1138,6 +1138,10 @@ pub(crate) struct HostTexture {
     /// Whether its contents come from title memory ([`fills`]): counted in
     /// [`KINDS`] while it lives.
     filled: bool,
+    /// Made in the PC's memory for lack of room on the card
+    /// (`crate::residency`): [`promote`] makes it again on the card once
+    /// there is room.
+    system: bool,
 }
 
 /// What a title texture has on the host: its host copy and, for a depth
@@ -1168,6 +1172,10 @@ struct Hosted {
     gone: std::sync::atomic::AtomicBool,
     /// A texture of [`PLACED_TEXTURES`].
     placed: std::sync::atomic::AtomicBool,
+    /// Its host copy in the PC's memory was given up by [`promote`] to be
+    /// made again on the card: the slots that showed the old one are made
+    /// again (`draw.rs`, [`shows_stale`]).
+    promoted: std::sync::atomic::AtomicBool,
 }
 
 /// Counts for the memory line: host copies of textures the title fills
@@ -1556,6 +1564,135 @@ pub(crate) fn reclaim() {
     FREED[1].store(now, Relaxed);
 }
 
+/// Once there is room on the card again (`crate::residency`, pressure
+/// `Low` or `Normal`): gives up host copies of placed textures the title
+/// fills that were made in the PC's memory for lack of room, most recently
+/// used first, within what may come back without raising the pressure. The
+/// GPU reads such a copy over the bus, about nine times slower (ADR 0003
+/// section 3), so the fallback must not stay.
+///
+/// A copy given up here is made again on the card by its next use, and
+/// uploaded from title memory again, as after [`let_go_idle`]: the title
+/// fills it and the host never wrote it. Unlike there, a descriptor slot
+/// may still show it: the slots on its memory are made due
+/// (`crate::descriptor::host::remapped`), and the texture pass makes each
+/// again from the new copy ([`shows_stale`]); until then the slot shows
+/// the old one, which it holds, so nothing reads a texture let go. One a
+/// list not yet reset holds, or that was handed out in the last second (a
+/// thread may be about to record it), stays, as does one draws read
+/// through a table (staged: those slots are made by draws). At most every
+/// half second. `VICTORY_PROMOTE=0` leaves them in the PC's memory.
+#[cfg(windows)]
+pub(crate) fn promote() {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    const PROTECT_MS: u64 = 1000;
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("VICTORY_PROMOTE").is_none_or(|v| v != "0")) {
+        return;
+    }
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = crate::host::now_ms();
+    let last = LAST.load(Relaxed);
+    if now < last + 500 || LAST.compare_exchange(last, now, Relaxed, Relaxed).is_err() {
+        return;
+    }
+    if crate::residency::promotable() == 0 {
+        return;
+    }
+    promote_idle(PROTECT_MS, 1);
+}
+
+/// [`promote`] without its gates: what was handed out `protect_ms` and
+/// `frames` ago or later stays. Returns how many copies were given up.
+#[cfg(windows)]
+pub(crate) fn promote_idle(protect_ms: u64, frames: u64) -> usize {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut given_up = 0;
+    let all = textures();
+    let mut candidates = Vec::new();
+    let mut at_of = Vec::new();
+    for &at in all.iter() {
+        // SAFETY: as in `let_go`.
+        let r = unsafe { &*(at as *const Resource) };
+        if !r.host.placed.load(Relaxed)
+            || !fills(&r.desc)
+            || crate::texture::host_wrote(at)
+            || crate::texture::is_staged(at as This)
+        {
+            continue;
+        }
+        let made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((host, _)) = made.as_ref() else {
+            continue;
+        };
+        if !host.system {
+            continue;
+        }
+        let used = r.host.used.load(Relaxed);
+        candidates.push(sixth_memory::residency::Candidate {
+            class: sixth_memory::residency::Class::Streamed,
+            bytes: host.bytes,
+            last_frame: used >> 32,
+            last_fence: 0,
+            held: std::sync::Arc::strong_count(host) != 1 || !crate::host::long_ago(used, protect_ms, frames),
+        });
+        at_of.push(at);
+    }
+    if candidates.is_empty() {
+        return 0;
+    }
+    for i in crate::residency::promote(&candidates) {
+        let at = at_of[i];
+        // SAFETY: as in `let_go`.
+        let r = unsafe { &*(at as *const Resource) };
+        let gone = {
+            let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+            // Again under the lock: a thread may have asked for it since.
+            let still = made.as_ref().is_some_and(|(host, _)| {
+                host.system
+                    && std::sync::Arc::strong_count(host) == 1
+                    && crate::host::long_ago(r.host.used.load(Relaxed), protect_ms, frames)
+            });
+            if !still {
+                continue;
+            }
+            // Under the lock: the next use must not find the staging state
+            // of the copy given up (it says "uploaded").
+            crate::texture::unstage(at as This);
+            r.host.promoted.store(true, Relaxed);
+            made.take()
+        };
+        let Some((host, _)) = gone else {
+            continue;
+        };
+        crate::residency::PROMOTED[0].fetch_add(1, Relaxed);
+        crate::residency::PROMOTED[1].fetch_add(host.bytes, Relaxed);
+        let len = host.bytes as usize;
+        crate::host::retire(host);
+        crate::descriptor::host::remapped(r.data() as usize, len);
+        given_up += 1;
+    }
+    given_up
+}
+
+/// Whether a descriptor slot that shows `shown` for title texture `this`
+/// shows a host copy [`promote`] gave up: the texture has a newer one, and
+/// the slot is to be made again from it.
+#[cfg(windows)]
+pub(crate) fn shows_stale(this: This, shown: &windows::Win32::Graphics::Direct3D12::ID3D12Resource) -> bool {
+    if this.is_null() {
+        return false;
+    }
+    let r = resource(this);
+    if r.desc.dimension == BUFFER || !r.host.promoted.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    let made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+    made.as_ref().is_some_and(|(host, _)| {
+        windows::core::Interface::as_raw(&host.texture) != windows::core::Interface::as_raw(shown)
+    })
+}
+
 /// For the memory line: title textures with a host copy the host renders
 /// to or writes and those copies' bytes (twins included); title textures
 /// without a host copy and the bytes of title memory they are; host copies
@@ -1635,11 +1772,13 @@ impl HostTexture {
         let bytes = host_bytes(&texture);
         HOST_TEXTURES[0].fetch_add(1, Relaxed);
         HOST_TEXTURES[1].fetch_add(bytes, Relaxed);
+        let system = crate::residency::in_system(&texture);
         HostTexture {
             texture,
             state: std::sync::atomic::AtomicU32::new(state),
             bytes,
             filled: false,
+            system,
         }
     }
 }
@@ -1994,6 +2133,7 @@ fn hand_out_resource(
             refused: std::sync::atomic::AtomicBool::new(false),
             gone: std::sync::atomic::AtomicBool::new(false),
             placed: std::sync::atomic::AtomicBool::new(false),
+            promoted: std::sync::atomic::AtomicBool::new(false),
         },
         #[cfg(windows)]
         fsr_output: std::sync::OnceLock::new(),
@@ -2495,7 +2635,7 @@ static RESOURCE_FUNCTIONS: Table<32> = {
 };
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::object::slot;
 
@@ -2728,6 +2868,57 @@ mod tests {
         assert_eq!((r[0], s[0]), (16, 128));
         let (_, _, _, t) = footprints(&texture(64, 64, 71, 1), 1, 1);
         assert_eq!(t, u64::MAX, "no second subresource");
+    }
+
+    /// A placed texture the title fills, made in the PC's memory for lack of
+    /// room, comes back to the card once there is room: its copy there is
+    /// given up while a slot still holds it, the slot is found showing a
+    /// stale copy, and the next use makes the copy on the card.
+    #[cfg(windows)]
+    #[test]
+    fn a_texture_made_in_the_pcs_memory_comes_back_to_the_card() {
+        if crate::host::host().is_none() {
+            return; // no host GPU here
+        }
+        let _one = PROMOTE_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        // Title memory for a 64x64 RGBA8 texture, kept for the test.
+        let this = placed_rgba();
+        assert!(title_fills(this));
+        let first = {
+            let _system = crate::residency::force_system();
+            host_resource(this).expect("a host copy").clone()
+        };
+        assert!(crate::residency::in_system(&first), "made in the PC's memory");
+        // A slot shows it (it holds the resource, as `HostHeap::keep` does).
+        let shown = first.clone();
+        assert!(!shows_stale(this, &shown), "not given up yet");
+        // Handed out just now: protected.
+        assert_eq!(promote_idle(60_000, 0), 0);
+        // Nothing protects it any more: given up, though the slot holds it.
+        assert!(promote_idle(0, 0) >= 1);
+        assert!(hosted(this, false).is_none(), "the copy in the PC's memory is gone");
+        // The next use makes it on the card; the slot's copy is stale.
+        let second = host_resource(this).expect("a host copy again").clone();
+        assert!(!crate::residency::in_system(&second), "on the card");
+        assert!(shows_stale(this, &shown));
+        assert!(!shows_stale(this, &second));
+        // Nothing more to bring back.
+        assert_eq!(promote_idle(0, 0), 0);
+    }
+
+    /// The tests that give up copies in the PC's memory (any test's), one
+    /// at a time.
+    pub(crate) static PROMOTE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A placed 64x64 RGBA8 texture the title fills, in title memory of
+    /// its own, never freed: a texture is found by its address, and memory
+    /// freed and handed out again would give another test this one.
+    pub(crate) fn placed_rgba() -> This {
+        let memory: &'static [u8] = Vec::leak(vec![0x5au8; 64 * 64 * 4 + (64 << 10)]);
+        let address = (memory.as_ptr() as u64).next_multiple_of(64 << 10);
+        // SAFETY: 56 bytes in the description's layout.
+        let words: [u32; 14] = unsafe { std::mem::transmute(texture(64, 64, 28, 1)) };
+        texture_at(address, &words).expect("a placed texture")
     }
 
     /// A 4x4 texture filled from a title buffer through our list and queue,

@@ -162,6 +162,7 @@ pub struct Stats {
     pub refused: u64,
     pub evicted: u64,
     pub evicted_bytes: u64,
+    pub promoted: u64,
 }
 
 impl Default for Residency {
@@ -263,6 +264,47 @@ impl Residency {
         chosen
     }
 
+    /// The bytes that may come back to the card from the PC's memory now:
+    /// none unless the pressure is `Low` or `Normal`, and only up to the
+    /// target less twice the margin, so that what comes back leaves room
+    /// for new resources and does not itself raise the pressure to `High`
+    /// (which would send the next ones to the PC's memory, and so on).
+    pub fn promotable(&self, budget: &Budget) -> u64 {
+        if budget.local_budget == 0 || self.pressure >= Pressure::High {
+            return 0;
+        }
+        let p = &self.policy;
+        let permille = ((p.target - 2.0 * p.margin) * 1000.0).round().max(0.0) as u128;
+        let goal = (u128::from(budget.local_budget) * permille / 1000) as u64;
+        goal.saturating_sub(budget.local_used)
+    }
+
+    /// Which of `candidates` (resources in the PC's memory) to make again
+    /// on the card, as indices into it: within [`Residency::promotable`],
+    /// those not `held` by a submission not yet run, most recently used
+    /// first (the ones read now gain most), smaller first among equals (more
+    /// of them fit). One that does not fit is passed over for smaller ones.
+    pub fn promote(&mut self, candidates: &[Candidate], budget: &Budget) -> Vec<usize> {
+        let mut room = self.promotable(budget);
+        if room == 0 {
+            return Vec::new();
+        }
+        let mut eligible: Vec<usize> = (0..candidates.len()).filter(|&i| !candidates[i].held).collect();
+        eligible.sort_by(|&a, &b| {
+            let (a, b) = (&candidates[a], &candidates[b]);
+            (std::cmp::Reverse(a.last_frame), a.bytes).cmp(&(std::cmp::Reverse(b.last_frame), b.bytes))
+        });
+        let mut chosen = Vec::new();
+        for i in eligible {
+            if candidates[i].bytes <= room {
+                room -= candidates[i].bytes;
+                chosen.push(i);
+            }
+        }
+        self.stats.promoted += chosen.len() as u64;
+        chosen
+    }
+
     /// Where a new resource of `class` and `bytes` goes, at the pressure of
     /// the last [`Residency::observe`] and `budget` now. Counted in [`Stats`].
     pub fn place(&mut self, class: Class, bytes: u64, budget: &Budget) -> Placement {
@@ -351,7 +393,7 @@ mod tests {
         // Both pools full: refused, with a reason, and counted.
         assert_eq!(r.place(Class::Streamed, 1 << 20, &budget(9, 12)), Placement::Refuse(Refusal::BothPoolsFull));
         assert_eq!(r.place(Class::Written, 1 << 20, &budget(9, 12)), Placement::Local, "never refused");
-        assert_eq!(r.stats, Stats { local: 3, system: 3, refused: 1, evicted: 0, evicted_bytes: 0 });
+        assert_eq!(r.stats, Stats { local: 3, system: 3, refused: 1, evicted: 0, evicted_bytes: 0, promoted: 0 });
     }
 
     fn c(class: Class, mib: u64, last_frame: u64, last_fence: u64, held: bool) -> Candidate {
@@ -390,5 +432,30 @@ mod tests {
         assert_eq!(r.need(&at(80)), 0);
         assert_eq!(r.need(&at(85)), 0);
         assert_eq!(r.need(&at(95)), 10 * GIB);
+    }
+
+    #[test]
+    fn promotion_waits_for_room_and_stops_short_of_the_target() {
+        let mut r = Residency::default();
+        // At High nothing comes back, whatever the candidates.
+        r.observe(&at(91));
+        let candidates = [
+            c(Class::Streamed, 4 << 10, 99, 0, false),  // 0: 4 GiB, used last frame
+            c(Class::Streamed, 1 << 10, 99, 0, false),  // 1: 1 GiB, as recent, smaller: first
+            c(Class::Streamed, 2 << 10, 50, 0, false),  // 2: 2 GiB, older
+            c(Class::Streamed, 1 << 10, 100, 0, true),  // 3: held by a list not yet run
+        ];
+        assert_eq!(r.promotable(&at(91)), 0);
+        assert_eq!(r.promote(&candidates, &at(91)), [] as [usize; 0]);
+        // Clear of the target by the margin: Normal, and room up to 80 %.
+        r.observe(&at(70));
+        assert_eq!(r.pressure(), Pressure::Normal);
+        assert_eq!(r.promotable(&at(70)), 10 * GIB);
+        assert_eq!(r.promote(&candidates, &at(70)), [1, 0, 2], "most recent first, smaller first; all fit");
+        // Room for 3 GiB: 1 and 2 fit, 0 (4 GiB) is passed over.
+        assert_eq!(r.promote(&candidates, &at(77)), [1, 2]);
+        assert_eq!(r.promotable(&at(80)), 0);
+        assert_eq!(r.promotable(&Budget::default()), 0, "no budget reported: nothing moves");
+        assert_eq!(r.stats.promoted, 5);
     }
 }
