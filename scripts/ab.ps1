@@ -2,13 +2,19 @@
 # configuration, stops each run after a fixed time, reads the runtime's own
 # telemetry from each run's log and writes one comparison report.
 #
-#   ab.bat                                   baseline, then hot windows 1024 MiB
+#   ab.bat                                   baseline, hot1024, cardbuf1
 #   ab.bat -Configs baseline,hot512,hot2048 -Seconds 420 -SkipSeconds 180
 #   ab.bat -ParseOnly logs\run_20261126_230000.log,logs\run_20261126_231000.log
 #
 # Configurations (each one run of the title):
 #   baseline       the defaults
-#   hot<MB>        VICTORY_HOT_WINDOWS_MB=<MB> (hot windows on the card)
+#   hot<MB>        VICTORY_HOT_WINDOWS_MB=<MB> (hot copies on the card: windows
+#                  and title buffers, by use; ADR 0003)
+#   cardbuf1       VICTORY_CARD_BUFFERS_MIN_MB=1, VICTORY_CARD_BUFFERS_MB=1024
+#                  (buffer copies from 1 MiB on the card from the start; 4.5x
+#                  less copy-back in the synthetic copyback_bench)
+#   wide           VICTORY_WIDE_REFRESH=1 (refreshes on several threads)
+#   keepsnap       VICTORY_KEEP_SNAPSHOTS=1
 #   noresidency    VICTORY_RESIDENCY=0 (the inherited texture rule)
 #   nopromote      VICTORY_PROMOTE=0
 #   relay          VICTORY_RELAY=1 (asynchronous copy-back; experimental)
@@ -21,7 +27,7 @@
 # Nothing here reads anything but the logs the runs write.
 [CmdletBinding()]
 param(
-    [string[]]$Configs = @('baseline', 'hot1024'),
+    [string[]]$Configs = @('baseline', 'hot1024', 'cardbuf1'),
     # How long each run lasts, from its start (loading included).
     [int]$Seconds = 360,
     # Frame lines before this many seconds after the first one are not
@@ -49,6 +55,9 @@ function Get-Overrides([string]$name) {
         '^hot(\d+)$' { return [ordered]@{ VICTORY_HOT_WINDOWS_MB = $Matches[1] } }
         '^noresidency$' { return [ordered]@{ VICTORY_RESIDENCY = '0' } }
         '^nopromote$' { return [ordered]@{ VICTORY_PROMOTE = '0' } }
+        '^cardbuf(\d+)$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = $Matches[1]; VICTORY_CARD_BUFFERS_MB = '1024' } }
+        '^wide$' { return [ordered]@{ VICTORY_WIDE_REFRESH = '1' } }
+        '^keepsnap$' { return [ordered]@{ VICTORY_KEEP_SNAPSHOTS = '1' } }
         '^relay$' { return [ordered]@{ VICTORY_RELAY = '1' } }
         '^late(\d)$' { return [ordered]@{ VICTORY_LATE_WAIT = $Matches[1] } }
         '^[A-Za-z0-9_-]+:(.+)$' {
@@ -279,7 +288,8 @@ try {
         $lines = @('@echo off', "rem Written by scripts\ab.ps1 for one run; deleted afterwards.", "call `"$Config`"", "set `"LOG_DIR=$dir`"")
         # Every switch the configurations use is cleared first, so a
         # setting in run.config.bat does not leak into another configuration.
-        foreach ($v in @('VICTORY_HOT_WINDOWS_MB', 'VICTORY_RESIDENCY', 'VICTORY_PROMOTE', 'VICTORY_RELAY', 'VICTORY_LATE_WAIT')) {
+        foreach ($v in @('VICTORY_HOT_WINDOWS_MB', 'VICTORY_RESIDENCY', 'VICTORY_PROMOTE', 'VICTORY_RELAY', 'VICTORY_LATE_WAIT',
+                'VICTORY_CARD_BUFFERS_MIN_MB', 'VICTORY_CARD_BUFFERS_MB', 'VICTORY_WIDE_REFRESH', 'VICTORY_KEEP_SNAPSHOTS')) {
             if (-not $over.Contains($v)) { $lines += "set `"$v=`"" }
         }
         foreach ($k in $over.Keys) { $lines += "set `"$k=$($over[$k])`"" }
