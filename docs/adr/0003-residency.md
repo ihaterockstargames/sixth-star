@@ -67,7 +67,9 @@ The proportions are not known yet. The ledger (§4) prints them on the frame lin
    - **Placement when made** (`80556df`): below the inherited 16 MiB, only writable copies go to the card when made (`VICTORY_CARD_BUFFERS_MIN_MB`). Read-only ones are left to the rule above. Placed first, they had taken the bytes the big writable ones needed.
    - **Copy-back noting** (`bb57383`, on by default, `VICTORY_BACK_NOTE=0` off): a 64 KiB page a copy-back wrote whole, and which the copy held as current before, is noted current instead of being copied back into the same copy at the next refresh.
    - Device tests: `a_window_asked_for_frame_after_frame_moves_to_the_card`, `a_hot_read_only_buffer_moves_and_a_writable_one_stays`, `a_slot_showing_a_copy_that_moved_is_made_again_from_the_card_copy`, `a_copy_back_notes_current_only_whole_pages_the_copy_held`.
-   - Still to do: noting for card merges; a writable copy that a list holds (it needs the move to happen when no list recorded but not yet submitted names it).
+   - Card merges note their pages too (`1f735a8`): in `frame_bench`'s best configuration, refreshes then copy only what the title wrote (20.5 instead of 31.5 MiB a frame).
+   - Moves no longer wait for flights to land (`b0ec57b`). Only a writable copy that something holds stays.
+   - Still to do: a writable copy that a list holds. It needs the move to happen when no list that is recorded but not yet submitted names it.
 
 ### Synthetic measurements (RTX 3070, 2026-11-26, through the host's own paths)
 
@@ -98,7 +100,18 @@ At 25% rewritten the GPU time falls 82 → 28 ms (what changed goes up once), bu
 | keep snapshots + wide copy-back | 66.0 | 6.5 | 42.2 | 17.4 |
 | late wait 3 | 109.9 | 42.0 | 42.8 | 27.6 |
 
-"Both" is 6× faster in this model. Whether the title's memory behaves like it is what the maintainer's A/B (`ab.bat`) says.
+With card-merge noting, "both" is 16.5 ms. It is 6× faster in this model.
+
+`late_bench`, submissions in flight through the title's own queue: eight submissions a frame, each copying eight 4 MiB buffers into textures, with 25% of the pages rewritten before each:
+
+| mode | ms/frame | sent ahead |
+|---|---|---|
+| synchronous | 87.0 | 0 |
+| `VICTORY_LATE_WAIT=1` | 64.1 | 8 a frame |
+| `VICTORY_LATE_WAIT=3` | 61.2 | 8 a frame |
+| `VICTORY_RELAY=1` | 63.4 | 8 a frame |
+
+The flights tests (`a7faf52`) pass in all six modes on this machine. A later synchronous run gave 66 ms, so the benchmark varies from run to run. Whether the title's memory behaves like it is what the maintainer's A/B (`ab.bat`) says.
 
 3. **Suballocation** of small copies (each is its own committed resource today), following D3D12MA's model of placed resources in large heaps.
 4. **Registry-tracked residency.** Every use known before submission, then `Evict`/`MakeResident` with LRU by submission (D3DX12Residency's model) instead of release-and-remake.
