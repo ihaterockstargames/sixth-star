@@ -213,12 +213,20 @@ pub(crate) fn card_hash_bytes(size: u64) -> u64 {
 /// copy, if the copy is to be there: [`cards`] is on, the size is within
 /// [`card_limits`] and below 1 GiB (the compare counts in 32 bits), and the
 /// host has what it takes (`Host::card_ready`).
-fn card_for(size: u64) -> Option<ID3D12Resource> {
+///
+/// Below the inherited 16 MiB, only copies shaders may write (`writable`)
+/// are put there when they are made: those are the ones a copy in the PC's
+/// memory costs most (a snapshot of every declared byte and a compare of
+/// all of it on the CPU, `copyback_bench`). Read-only ones are left to the
+/// hot rule ([`moved_up`]), which goes by use: put there first, they took
+/// the bytes [`card_limits`] allows before the writable ones were made
+/// (`frame_bench`: 85 instead of 62 ms preparing).
+fn card_for(size: u64, writable: bool) -> Option<ID3D12Resource> {
     if !cards() {
         return None;
     }
     let (least, most) = card_limits();
-    if size < least || size >= 1 << 30 {
+    if size < least || size >= 1 << 30 || (!writable && size < 16 << 20) {
         return None;
     }
     let host = host()?;
@@ -3178,7 +3186,8 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
         }
         // A big one, with `cards`: shaders get a buffer in the card's own
         // memory, and the one made in the PC's memory is the CPU's side.
-        entry.shadow = Some(buffer_copy_made(key.0, len, card_for(size))?);
+        let writable = crate::resource::may_be_written(key.1 as crate::object::This);
+        entry.shadow = Some(buffer_copy_made(key.0, len, card_for(size, writable))?);
     }
     entry.shadow.clone()
 }

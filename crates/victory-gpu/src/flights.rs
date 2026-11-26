@@ -517,3 +517,266 @@ fn copyback_bench() {
         }
     }
 }
+
+/// Synthetic: one frame shaped like the game's measured one, through the
+/// host's own paths, under each combination of switches (each in a child
+/// process, since the switches are read once): 1 GiB of read-only title
+/// buffers (4 MiB each) read whole by a compute pass, 2% of their pages
+/// rewritten by the title each frame; 64 writable 4 MiB and 8 writable
+/// 16 MiB buffers declared written, 2% of their pages written by shaders;
+/// every list kept until two frames later, as the title keeps its lists
+/// until it resets them (so copies are never alone). Run with
+/// `cargo test -p victory-gpu --release --lib frame_bench -- --ignored --nocapture`.
+#[test]
+#[ignore = "a benchmark (several minutes, about 4 GiB of memory)"]
+fn frame_bench() {
+    if crate::host::host().is_none() {
+        return;
+    }
+    let exe = std::env::current_exe().expect("the test binary");
+    let configs: [(&str, &[(&str, &str)]); 10] = [
+        ("defaults", &[]),
+        ("hot 1024", &[("SIXTH_BENCH_HOT_MB", "1024")]),
+        ("card buffers from 1 MiB", &[("VICTORY_CARD_BUFFERS_MIN_MB", "1"), ("VICTORY_CARD_BUFFERS_MB", "1024")]),
+        ("card 1 MiB + hot 1024", &[("VICTORY_CARD_BUFFERS_MIN_MB", "1"), ("VICTORY_CARD_BUFFERS_MB", "1024"), ("SIXTH_BENCH_HOT_MB", "1024")]),
+        ("wide refresh", &[("VICTORY_WIDE_REFRESH", "1")]),
+        ("keep snapshots + wide back", &[("VICTORY_KEEP_SNAPSHOTS", "1"), ("VICTORY_WIDE_BACK", "1")]),
+        (
+            "card 1 MiB + hot 1024 + wide refresh",
+            &[("VICTORY_CARD_BUFFERS_MIN_MB", "1"), ("VICTORY_CARD_BUFFERS_MB", "1024"), ("SIXTH_BENCH_HOT_MB", "1024"), ("VICTORY_WIDE_REFRESH", "1")],
+        ),
+        ("late wait 3", &[("VICTORY_LATE_WAIT", "3")]),
+        (
+            "hot 1024 + keep snapshots + wide back",
+            &[("SIXTH_BENCH_HOT_MB", "1024"), ("VICTORY_KEEP_SNAPSHOTS", "1"), ("VICTORY_WIDE_BACK", "1")],
+        ),
+        (
+            "card 1 MiB + hot 1024 + keep snapshots + wide back",
+            &[
+                ("VICTORY_CARD_BUFFERS_MIN_MB", "1"),
+                ("VICTORY_CARD_BUFFERS_MB", "1024"),
+                ("SIXTH_BENCH_HOT_MB", "1024"),
+                ("VICTORY_KEEP_SNAPSHOTS", "1"),
+                ("VICTORY_WIDE_BACK", "1"),
+            ],
+        ),
+    ];
+    println!("| switches | ms/frame | preparing | on the GPU | copying back | copies on the card |");
+    println!("|---|---|---|---|---|---|");
+    for (name, vars) in configs {
+        let mut child = std::process::Command::new(&exe);
+        child
+            .args(["--exact", "flights::frame_child", "--ignored", "--nocapture", "--test-threads", "1"])
+            .env("SIXTH_FRAME_CHILD", "1");
+        for v in [
+            "VICTORY_LATE_WAIT",
+            "VICTORY_RELAY",
+            "VICTORY_CARD_BUFFERS_MIN_MB",
+            "VICTORY_CARD_BUFFERS_MB",
+            "VICTORY_WIDE_REFRESH",
+            "VICTORY_WIDE_BACK",
+            "VICTORY_KEEP_SNAPSHOTS",
+            "SIXTH_BENCH_HOT_MB",
+        ] {
+            child.env_remove(v);
+        }
+        for (k, v) in vars {
+            child.env(k, v);
+        }
+        let out = child.output().expect("the child ran");
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        match text.lines().find_map(|l| l.split_once("FRAME-ROW ")) {
+            Some((_, row)) => println!("| {name} | {row} |"),
+            None => println!("| {name} | failed: {} |", String::from_utf8_lossy(&out.stderr).lines().filter(|l| l.contains("panicked") || l.contains("failure")).collect::<Vec<_>>().join(" ")),
+        }
+    }
+}
+
+/// [`frame_bench`]'s frame, in a child process.
+#[test]
+#[ignore = "run by frame_bench in a child process"]
+fn frame_child() {
+    use windows::Win32::Graphics::Direct3D12::*;
+    if std::env::var_os("SIXTH_FRAME_CHILD").is_none() {
+        return;
+    }
+    let Some(host) = crate::host::host() else {
+        return;
+    };
+    const READ: usize = 256;
+    const SMALL: usize = 64;
+    const BIG: usize = 8;
+    const FRAMES: u64 = 40;
+    const COUNTED: u64 = 12;
+    let hot = std::env::var("SIXTH_BENCH_HOT_MB").ok().and_then(|v| v.parse::<u64>().ok());
+    // SAFETY: object creation on the host's device.
+    let (root, read_pass, write_pass) = unsafe {
+        let device: &ID3D12Device = &host.device;
+        let read = "cbuffer c : register(b0) { uint stride; uint frame; uint threads; }; ByteAddressBuffer t : register(t0); RWByteAddressBuffer o : register(u0);
+             [numthreads(256, 1, 1)] void main(uint3 id : SV_DispatchThreadID) {
+                 if (id.x < threads) { uint4 v = t.Load4(id.x * 16); o.Store((id.x & 0x3fff) * 4, v.x ^ v.y ^ v.z ^ v.w); }
+             }";
+        let write = "cbuffer c : register(b0) { uint stride; uint frame; uint threads; }; ByteAddressBuffer t : register(t0); RWByteAddressBuffer o : register(u0);
+             [numthreads(256, 1, 1)] void main(uint3 id : SV_DispatchThreadID) {
+                 if (id.x < threads) { o.Store(id.x * stride, id.x ^ frame); }
+             }";
+        let params = [
+            D3D12_ROOT_PARAMETER {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+                Anonymous: D3D12_ROOT_PARAMETER_0 {
+                    Constants: D3D12_ROOT_CONSTANTS { ShaderRegister: 0, RegisterSpace: 0, Num32BitValues: 3 },
+                },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            },
+            D3D12_ROOT_PARAMETER {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_SRV,
+                Anonymous: D3D12_ROOT_PARAMETER_0 { Descriptor: D3D12_ROOT_DESCRIPTOR { ShaderRegister: 0, RegisterSpace: 0 } },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            },
+            D3D12_ROOT_PARAMETER {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_UAV,
+                Anonymous: D3D12_ROOT_PARAMETER_0 { Descriptor: D3D12_ROOT_DESCRIPTOR { ShaderRegister: 0, RegisterSpace: 0 } },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            },
+        ];
+        let desc = D3D12_ROOT_SIGNATURE_DESC { NumParameters: 3, pParameters: params.as_ptr(), ..Default::default() };
+        let mut blob = None;
+        D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &mut blob, None).expect("root signature");
+        let blob = blob.expect("blob");
+        let root: ID3D12RootSignature = device
+            .CreateRootSignature(0, std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize()))
+            .expect("root");
+        let pass = |src: &str| -> ID3D12PipelineState {
+            let code = crate::host::compile(src, windows::core::s!("main"), windows::core::s!("cs_5_1")).expect("compiled");
+            device
+                .CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                    pRootSignature: std::mem::transmute_copy(&root),
+                    CS: D3D12_SHADER_BYTECODE { pShaderBytecode: code.as_ptr().cast(), BytecodeLength: code.len() },
+                    ..Default::default()
+                })
+                .expect("pipeline")
+        };
+        (root.clone(), pass(read), pass(write))
+    };
+    let out = host.uav_buffer(64 << 10).expect("out");
+    // Title memory, write-watched, as the runtime maps it.
+    const MIB4: usize = 4 << 20;
+    const MIB16: usize = 16 << 20;
+    let total = READ * MIB4 + SMALL * MIB4 + BIG * MIB16;
+    // SAFETY: a fresh reservation of our own, never freed (the process ends).
+    let region = unsafe {
+        windows_sys::Win32::System::Memory::VirtualAlloc(
+            std::ptr::null(),
+            total,
+            windows_sys::Win32::System::Memory::MEM_RESERVE | windows_sys::Win32::System::Memory::MEM_COMMIT | 0x20_0000,
+            windows_sys::Win32::System::Memory::PAGE_READWRITE,
+        )
+    } as u64;
+    assert_ne!(region, 0);
+    let mut at = region;
+    let mut make = |len: usize, flags: u32| {
+        let b = (crate::resource::tests::title_buffer_at_flags(at, len as u64, flags), at, len);
+        at += len as u64;
+        b
+    };
+    let reads: Vec<(This, u64, usize)> = (0..READ).map(|_| make(MIB4, 0)).collect();
+    let mut writes: Vec<(This, u64, usize)> = (0..SMALL).map(|_| make(MIB4, 4)).collect();
+    writes.extend((0..BIG).map(|_| make(MIB16, 4)));
+    // Shaders write one dword every 200 KiB: 2% of the 4 KiB pages.
+    let stride = 200u32 << 10;
+    let mut held: std::collections::VecDeque<crate::host::HostList> = std::collections::VecDeque::new();
+    let (mut times, mut split) = (Vec::new(), [0u64; 3]);
+    for f in 0..FRAMES {
+        crate::shadow::test_hot(hot, Some(400_000 + f));
+        // The title's writes: 2% of the read buffers' pages.
+        for (i, b) in reads.iter().enumerate() {
+            for page in 0..b.2 / crate::watch::PAGE {
+                if (page * 131 + i * 17 + f as usize * 7) % 100 < 2 {
+                    // SAFETY: inside the buffer's own memory.
+                    unsafe { ((b.1 as usize + page * crate::watch::PAGE) as *mut u8).write(f as u8) };
+                }
+            }
+        }
+        let _ = crate::host::take_submission_us();
+        let began = std::time::Instant::now();
+        let list = host.new_list().expect("a host list");
+        // SAFETY: recording on our own list; what it names lives on.
+        unsafe {
+            list.list.SetComputeRootSignature(&root);
+            list.list.SetComputeRootUnorderedAccessView(2, out.GetGPUVirtualAddress());
+            list.list.SetPipelineState(&read_pass);
+        }
+        for b in &reads {
+            let copy = crate::shadow::find(b.1, b.2 as u64).expect("a copy");
+            copy.refresh(&list, b.1, b.2 as u64);
+            list.buffer_state(&copy.buffer, crate::host::BUFFER_READ);
+            let threads = (b.2 / 16) as u32;
+            // SAFETY: as above.
+            unsafe {
+                list.list.SetComputeRoot32BitConstants(0, 3, [0u32, f as u32, threads].as_ptr().cast(), 0);
+                list.list.SetComputeRootShaderResourceView(1, copy.gpu(b.1));
+                list.list.Dispatch(threads.div_ceil(256), 1, 1);
+            }
+        }
+        // SAFETY: as above.
+        unsafe { list.list.SetPipelineState(&write_pass) };
+        for b in &writes {
+            let copy = crate::shadow::find(b.1, b.2 as u64).expect("a copy");
+            copy.refresh(&list, b.1, b.2 as u64);
+            list.buffer_state(&copy.buffer, crate::host::BUFFER_WRITE);
+            copy.gpu_writes(&list, b.1, b.2 as u64);
+            let threads = b.2 as u32 / stride;
+            // SAFETY: as above.
+            unsafe {
+                list.list.SetComputeRoot32BitConstants(0, 3, [stride, f as u32, threads].as_ptr().cast(), 0);
+                list.list.SetComputeRootUnorderedAccessView(2, copy.gpu(b.1));
+                list.list.Dispatch(threads.div_ceil(256), 1, 1);
+                list.list.SetComputeRootUnorderedAccessView(2, out.GetGPUVirtualAddress());
+            }
+        }
+        list.close();
+        host.execute(&[&list]);
+        if crate::host::late() {
+            // The frame's end, as a present is: everything in the air lands.
+            let done = host.new_list().expect("a host list");
+            done.close();
+            host.execute(&[&done]);
+        }
+        let took = began.elapsed().as_secs_f64() * 1e3;
+        let us = crate::host::take_submission_us();
+        // Kept two frames, as the title keeps its lists until it resets them.
+        held.push_back(list);
+        if held.len() > 2 {
+            held.pop_front();
+        }
+        if f >= FRAMES - COUNTED {
+            times.push(took);
+            for k in 0..3 {
+                split[k] += us[k];
+            }
+        }
+    }
+    assert_eq!(crate::descriptor::host::device_removed(), None);
+    // The last frame's shader writes are in title memory.
+    let last = (FRAMES - 1) as u32;
+    for b in &writes {
+        // SAFETY: inside the buffer's own memory.
+        let got = unsafe { ((b.1 as usize + stride as usize) as *const u32).read() };
+        assert_eq!(got, 1 ^ last, "a shader write came back");
+    }
+    times.sort_by(f64::total_cmp);
+    let carded = reads
+        .iter()
+        .chain(&writes)
+        .filter(|b| crate::shadow::find(b.1, 256).is_some_and(|c| c.carded()))
+        .count();
+    let per = |us: u64| us as f64 / 1e3 / COUNTED as f64;
+    println!(
+        "FRAME-ROW {:.1} | {:.1} | {:.1} | {:.1} | {carded} of {}",
+        times[times.len() / 2],
+        per(split[0]),
+        per(split[1]),
+        per(split[2]),
+        reads.len() + writes.len()
+    );
+}
