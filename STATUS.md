@@ -109,7 +109,7 @@ Task Manager figures were not taken for this run.
   aid kept outside the repository): the intro frame line shows 1 draw or
   dispatch per frame not run. Later measurements say whether it was on.
 - The test title is not named in this repository.
-- From commit after `23c80c2` the runner writes a `session:` line every
+- From commit `78d4389` on, the runner writes a `session:` line every
   minute: time since the first present, frames, exact average FPS, the worst
   second, the longest time between two presents, seconds in which draws were
   not run, the GPU and driver, the display mode and the `VICTORY_*` settings
