@@ -2,7 +2,7 @@
 # configuration, stops each run after a fixed time, reads the runtime's own
 # telemetry from each run's log and writes one comparison report.
 #
-#   ab.bat                                   baseline, best, hot1024, cardbuf1
+#   ab.bat                                   baseline, best, bestlate, hot1024, cardbuf1
 #   ab.bat -Configs baseline,hot512,hot2048 -Seconds 420 -SkipSeconds 180
 #   ab.bat -ParseOnly logs\run_20261126_230000.log,logs\run_20261126_231000.log
 #
@@ -35,12 +35,12 @@
 # Nothing here reads anything but the logs the runs write.
 [CmdletBinding()]
 param(
-    [string[]]$Configs = @('baseline', 'best', 'hot1024', 'cardbuf1'),
+    [string[]]$Configs = @('baseline', 'best', 'bestlate', 'hot1024', 'cardbuf1'),
     # How long each run lasts, from its start (loading included).
-    [int]$Seconds = 360,
+    [int]$Seconds = 300,
     # Frame lines before this many seconds after the first one are not
     # counted (loading, the menu, getting into the same scene).
-    [int]$SkipSeconds = 150,
+    [int]$SkipSeconds = 120,
     # The settings file (default: run.config.bat next to run.bat).
     [string]$Config = '',
     # Where the logs and the report go (default: logs\ab_<time> next to the settings).
