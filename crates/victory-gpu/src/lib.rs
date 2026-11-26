@@ -42,6 +42,8 @@ mod watchdog;
 #[cfg(windows)]
 mod session;
 #[cfg(windows)]
+mod sysprof;
+#[cfg(windows)]
 mod host;
 #[cfg(windows)]
 mod indirect;

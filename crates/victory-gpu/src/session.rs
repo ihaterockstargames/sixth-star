@@ -130,7 +130,7 @@ pub(crate) fn line(r: &Record, running_s: f64, longest_gap_us: u64) -> String {
     format!(
         "session: {} min {} s since the first present, {:.0} frames, {fps:.2} FPS average ({:.1} ms/frame), \
          worst second {:.2} FPS, longest time between two presents {:.2} s; {} of {} seconds with draws not run; \
-         {}; display {}x{}{}; {}",
+         {}, VRAM peak {:.2} GiB; display {}x{}{}; {}",
         (running_s / 60.0) as u64,
         (running_s % 60.0) as u64,
         r.frames,
@@ -140,6 +140,7 @@ pub(crate) fn line(r: &Record, running_s: f64, longest_gap_us: u64) -> String {
         r.incomplete,
         r.windows,
         crate::host::adapter_text(),
+        crate::sysprof::PEAK_VRAM.load(Ordering::Relaxed) as f64 / (1u64 << 30) as f64,
         res.display.0,
         res.display.1,
         res.output.map_or(String::new(), |(w, h)| format!(", output {w}x{h}, scale {}", res.scale)),
