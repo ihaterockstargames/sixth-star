@@ -1831,33 +1831,78 @@ fn raw_window(offset: u64, first: u64, count: u32, stride: u32) -> Option<(u64, 
 /// for. Since every buffer view of the heap is made for shaders that pick
 /// them by index, one such view ended the run (2026-11-24, run 10).
 fn buffer_view_ok(format: DXGI_FORMAT, first: u64, count: u32, stride: u32, raw: bool, width: u64) -> bool {
-    use crate::resource::family;
-    let f = format.0 as u32;
-    let element = if raw {
-        // raw: R32 typeless, counted in dwords, starting on 16 bytes
-        if format != DXGI_FORMAT_R32_TYPELESS || stride != 0 || !first.is_multiple_of(4) {
-            return false;
-        }
-        4
-    } else if stride > 0 {
-        // structured: no format, a stride the host takes
-        if format != DXGI_FORMAT_UNKNOWN || stride > 2048 || !stride.is_multiple_of(4) {
-            return false;
-        }
-        u64::from(stride)
-    } else {
-        // typed: a format with a size that is not typeless
-        let typeless = family(f) == f && family(f + 1) == f;
-        match crate::resource::element(f) {
-            Some((bytes, 1)) if f != 0 && !typeless && bytes > 0 => bytes,
-            _ => return false,
-        }
+    let Some(element) = view_element(format, first, stride, raw) else {
+        return false;
     };
     count > 0
         && first
             .checked_add(u64::from(count))
             .and_then(|end| end.checked_mul(element))
             .is_some_and(|end| end <= width)
+}
+
+/// The bytes of one element of a buffer view the host can make (see
+/// [`buffer_view_ok`]); `None` for a kind of view it refuses whatever its
+/// extent.
+fn view_element(format: DXGI_FORMAT, first: u64, stride: u32, raw: bool) -> Option<u64> {
+    use crate::resource::family;
+    let f = format.0 as u32;
+    if raw {
+        // raw: R32 typeless, counted in dwords, starting on 16 bytes
+        return (format == DXGI_FORMAT_R32_TYPELESS && stride == 0 && first.is_multiple_of(4)).then_some(4);
+    }
+    if stride > 0 {
+        // structured: no format, a stride the host takes
+        return (format == DXGI_FORMAT_UNKNOWN && stride <= 2048 && stride.is_multiple_of(4))
+            .then_some(u64::from(stride));
+    }
+    // typed: a format with a size that is not typeless
+    let typeless = family(f) == f && family(f + 1) == f;
+    match crate::resource::element(f) {
+        Some((bytes, 1)) if f != 0 && !typeless && bytes > 0 => Some(bytes),
+        _ => None,
+    }
+}
+
+/// Buffer views cut to the end of their host copy ([`fit_to_copy`]), since
+/// the start.
+pub(crate) static CUT_VIEWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether buffer views that run past the end of their host copy are cut to
+/// it (`VICTORY_CUT_VIEWS=0`: left null, as before; on by default).
+fn cut_views() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_CUT_VIEWS").is_none_or(|v| v != "0"))
+}
+
+/// The element count of a buffer view, cut to the elements that lie in its
+/// host copy of `width` bytes.
+///
+/// The console bounds a buffer read by the view's own record count: an
+/// element past it reads 0 and a write past it is dropped, while every
+/// element within it reads memory. The host refuses a view past its buffer,
+/// and such a view used to be left null, so that **every** element read 0,
+/// also the ones in the copy. Cut, the elements in the copy read their bytes
+/// and the ones past it read 0 (and writes there are dropped), as the host
+/// bounds-checks every buffer view.
+///
+/// What it cannot do: elements past the copy that the console would read
+/// from the title memory next to it still read 0 here. That needs a copy that
+/// covers the whole view (a resource registry that grows copies to their
+/// views).
+fn fit_to_copy(format: DXGI_FORMAT, first: u64, count: u32, stride: u32, raw: bool, width: u64) -> u32 {
+    let Some(element) = view_element(format, first, stride, raw) else {
+        return count;
+    };
+    let fits = (width / element).saturating_sub(first);
+    if fits == 0 || u64::from(count) <= fits || !cut_views() {
+        // Wholly past the copy (left null: it reads 0, which the console
+        // does only past the view's records), or nothing to cut.
+        return count;
+    }
+    CUT_VIEWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // `fits < count`, so it is a u32.
+    fits as u32
 }
 
 fn buffer_srv(
@@ -1901,6 +1946,9 @@ fn buffer_srv(
     let raw = buffer.Flags.0 & D3D12_BUFFER_SRV_FLAG_RAW.0 != 0;
     // SAFETY: a live buffer.
     let width = unsafe { shadow.buffer.GetDesc() }.Width;
+    let count = fit_to_copy(desc.Format, first, count, stride, raw, width);
+    // A buffer view's union member (writing a field of a union is safe).
+    desc.Anonymous.Buffer.NumElements = count;
     if !buffer_view_ok(desc.Format, first, count, stride, raw, width) {
         REFUSED_VIEWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         once!(
@@ -1981,6 +2029,9 @@ fn buffer_uav(
     }
     // SAFETY: a live buffer.
     let width = unsafe { shadow.buffer.GetDesc() }.Width;
+    let count = fit_to_copy(desc.Format, first, count, stride, raw, width);
+    // A buffer view's union member (writing a field of a union is safe).
+    desc.Anonymous.Buffer.NumElements = count;
     if !buffer_view_ok(desc.Format, first, count, stride, raw, width) {
         REFUSED_VIEWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         once!(
@@ -2591,6 +2642,38 @@ mod tests {
         assert!(!buffer_view_ok(DXGI_FORMAT_R32_TYPELESS, 0, 0, 0, true, 4096));
         // a structured view the host takes as it is
         assert!(buffer_view_ok(DXGI_FORMAT_UNKNOWN, 1, 10, 12, false, 4096));
+    }
+
+    /// A buffer view that runs past its host copy is cut to the elements in
+    /// the copy, so that those read their bytes; it was left null, and every
+    /// element read 0. Wholly past the copy, or of a kind the host refuses
+    /// anyway, it is left as it is (and then null).
+    #[test]
+    fn buffer_views_past_their_copy_are_cut_not_nulled() {
+        let raw = DXGI_FORMAT_R32_TYPELESS;
+        // Raw: 1,000 dwords from dword 8 in a 2,000-byte copy: 492 fit.
+        let cut = fit_to_copy(raw, 8, 1000, 0, true, 2000);
+        assert_eq!(cut, 492);
+        assert!(!buffer_view_ok(raw, 8, 1000, 0, true, 2000), "as made by the title: refused");
+        assert!(buffer_view_ok(raw, 8, cut, 0, true, 2000), "cut: accepted");
+        assert_eq!((8 + u64::from(cut)) * 4, 2000, "to the last whole element");
+        // Structured, 12-byte elements: 4096 / 12 = 341 whole elements, 331 from 10.
+        assert_eq!(fit_to_copy(DXGI_FORMAT_UNKNOWN, 10, 500, 12, false, 4096), 331);
+        assert!(buffer_view_ok(DXGI_FORMAT_UNKNOWN, 10, 331, 12, false, 4096));
+        // Typed, R32G32B32A32_FLOAT (16 bytes): 256 in 4096, 255 from 1.
+        assert_eq!(fit_to_copy(DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 300, 0, false, 4096), 255);
+        assert!(buffer_view_ok(DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 255, 0, false, 4096));
+        // Inside the copy: unchanged.
+        assert_eq!(fit_to_copy(raw, 0, 100, 0, true, 4096), 100);
+        // Wholly past the copy: unchanged, still refused (null).
+        assert_eq!(fit_to_copy(raw, 1024, 10, 0, true, 4096), 10);
+        assert!(!buffer_view_ok(raw, 1024, 10, 0, true, 4096));
+        // A raw view not on 16 bytes, a typeless typed view: refused whatever
+        // the extent, so not cut.
+        assert_eq!(fit_to_copy(raw, 2, 5000, 0, true, 4096), 5000);
+        assert_eq!(fit_to_copy(DXGI_FORMAT_R32G32B32A32_TYPELESS, 0, 5000, 0, false, 4096), 5000);
+        // Less than one element left: unchanged (null).
+        assert_eq!(fit_to_copy(DXGI_FORMAT_UNKNOWN, 0, 10, 16, false, 12), 10);
     }
 
     /// The queue of textures picked by index serves the slots looked at
