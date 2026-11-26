@@ -1,6 +1,6 @@
 # Sixth Star — test status
 
-Last updated: 2026-11-26 (evening)
+Last updated: 2026-11-26 (late evening)
 Build: current main
 Binary: sixth-star.exe
 
@@ -58,6 +58,17 @@ minutes or more without a crash; that has not been reached or measured.
   measurement below) but which shows them; render targets stay on the card.
   `VICTORY_RESIDENCY=0` restores the old rule (such textures were not made
   while the card was full). Every measurement above predates it.
+- Textures back to the card (since `e2453a4`, default on): once the card is
+  below 80% of its budget again, textures that went to the PC's memory are
+  made again on the card, and the descriptor slots that showed them are
+  remade. `VICTORY_PROMOTE=0` keeps them in the PC's memory. Not measured on
+  the title yet.
+- Hot windows on the card (since `58a30ed`, **off by default**):
+  `VICTORY_HOT_WINDOWS_MB=1024` (for example, in `run.config.bat`) moves
+  windows of title memory that draws read frame after frame from the PC's
+  memory to the card, up to that many MB and only while the card has room.
+  It is an A/B switch: whether it is faster depends on how much of those
+  windows the title rewrites each frame, which is not measured yet.
 - A local pipeline skip list was active in every 2026-11-26 measurement (see
   Notes). Every figure on this page is from this machine with these
   settings.
@@ -141,7 +152,9 @@ Task Manager figures were not taken for this run.
   the PC's memory, from the device's own destruction notices) and
   `residency:` (pressure, textures made in the PC's memory, idle textures
   given up, passes with no room in either pool). See
-  `docs/adr/0003-residency.md`.
+  `docs/adr/0003-residency.md`. From `e2453a4` and `58a30ed` the `residency:`
+  line also counts textures brought back to the card, the slots remade for
+  them, and windows moved to the card.
 - Synthetic, on this machine (not the title): 64 reads of a 2048x2048
   texture took 4.4 ms from the card and 41.1 ms from the PC's memory (9.3x);
   the card filled to 90% (6.08 of 6.72 GiB) placed a title-filled texture in
