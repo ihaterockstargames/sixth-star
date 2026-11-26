@@ -59,8 +59,45 @@ static LOGGED: AtomicU64 = AtomicU64::new(0);
 
 /// A present `gap_us` after the one before (0 for the first).
 pub(crate) fn presented(now_us: u64, gap_us: u64) {
-    let _ = FIRST.compare_exchange(0, now_us + 1, Ordering::Relaxed, Ordering::Relaxed);
+    if FIRST.compare_exchange(0, now_us + 1, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+        tracing::info!("{}", startup_line(process_age_s(), &crate::cpuprof::totals()));
+    }
     LONGEST_GAP.fetch_max(gap_us, Ordering::Relaxed);
+}
+
+/// Seconds since the process was created (`GetProcessTimes`).
+fn process_age_s() -> Option<f64> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let (mut created, mut exited, mut kernel, mut user, mut now) = (zero, zero, zero, zero, zero);
+    // SAFETY: plain queries into our own out values.
+    let ok = unsafe {
+        let ok = GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) != 0;
+        GetSystemTimeAsFileTime(&mut now);
+        ok
+    };
+    if !ok {
+        return None;
+    }
+    let t = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
+    Some(t(now).saturating_sub(t(created)) as f64 / 1e7)
+}
+
+/// The start-up line: time to the first present, and our code's share of
+/// it by kind (all threads, so it can exceed the wall time).
+pub(crate) fn startup_line(age_s: Option<f64>, totals: &[(&str, f64, u64)]) -> String {
+    let parts: Vec<String> = totals
+        .iter()
+        .filter(|(_, ms, _)| *ms >= 0.05)
+        .map(|(name, ms, calls)| format!("{name} {:.2} s ({calls})", ms / 1000.0))
+        .collect();
+    format!(
+        "startup: the first present {} after the process started; our code until then, all threads: {}",
+        age_s.map_or_else(|| "(age unknown)".to_owned(), |s| format!("{s:.1} s")),
+        if parts.is_empty() { "nothing measured".to_owned() } else { parts.join(", ") }
+    )
 }
 
 /// Seconds since the first present.
@@ -179,6 +216,17 @@ mod tests {
         eprintln!("{text}");
         assert!(text.starts_with("GPU ") && text.contains(", driver "), "{text}");
         assert!(!text.contains("GPU unknown"), "{text}");
+    }
+
+    #[test]
+    fn the_startup_line_names_where_the_time_went() {
+        let line = startup_line(Some(93.4), &[("shaders", 41_000.0, 2600), ("pipelines", 22_500.0, 900), ("upkeep", 0.01, 3)]);
+        assert_eq!(
+            line,
+            "startup: the first present 93.4 s after the process started; our code until then, all threads: \
+             shaders 41.00 s (2600), pipelines 22.50 s (900)"
+        );
+        assert!(process_age_s().is_some_and(|s| s > 0.0 && s < 86_400.0));
     }
 
     #[test]

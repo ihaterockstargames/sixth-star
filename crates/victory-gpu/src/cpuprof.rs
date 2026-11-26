@@ -38,9 +38,13 @@ pub(crate) enum Work {
     /// Letting go of objects no list holds any more, and other upkeep
     /// between submissions.
     Upkeep = 8,
+    /// Translating console shaders, or finding them in the cache.
+    Shaders = 9,
+    /// Making host pipelines (or loading them from the library).
+    Pipelines = 10,
 }
 
-const KINDS: usize = 9;
+const KINDS: usize = 11;
 
 const NAMES: [&str; KINDS] = [
     "write watch",
@@ -52,6 +56,8 @@ const NAMES: [&str; KINDS] = [
     "recording",
     "copy-back",
     "upkeep",
+    "shaders",
+    "pipelines",
 ];
 
 pub(crate) fn on() -> bool {
@@ -87,8 +93,21 @@ fn thread_id() -> u32 {
     unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }
 }
 
+/// Since the start, all threads: nanoseconds and calls per kind (never
+/// reset; for the start-up line).
+static TOTAL: [[AtomicU64; KINDS]; 2] = [const { [const { AtomicU64::new(0) }; KINDS] }; 2];
+
+/// The totals since the start: per kind, (ms, calls).
+pub(crate) fn totals() -> Vec<(&'static str, f64, u64)> {
+    (0..KINDS)
+        .map(|k| (NAMES[k], TOTAL[0][k].load(Ordering::Relaxed) as f64 / 1e6, TOTAL[1][k].load(Ordering::Relaxed)))
+        .collect()
+}
+
 /// Adds `ns` of `work` to the calling thread.
 pub(crate) fn add(work: Work, ns: u64) {
+    TOTAL[0][work as usize].fetch_add(ns, Ordering::Relaxed);
+    TOTAL[1][work as usize].fetch_add(1, Ordering::Relaxed);
     let _ = MINE.try_with(|c| {
         c.ns[work as usize].fetch_add(ns, Ordering::Relaxed);
         c.calls[work as usize].fetch_add(1, Ordering::Relaxed);
@@ -149,6 +168,8 @@ const ALL: [Work; KINDS] = [
     Work::Recording,
     Work::CopyBack,
     Work::Upkeep,
+    Work::Shaders,
+    Work::Pipelines,
 ];
 
 pub(crate) fn take() -> Taken {
