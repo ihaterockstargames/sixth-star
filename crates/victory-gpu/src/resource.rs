@@ -499,6 +499,7 @@ fn twin_texture(
         TWINS[1].fetch_add(1, Relaxed);
         return None;
     };
+    crate::ledger::book(&texture, crate::ledger::Cat::DepthTwin);
     crate::host::name(&texture, || {
         format!("depth twin {}x{} f{}", d.width, d.height, d.format)
     });
@@ -523,7 +524,10 @@ fn twin_texture(
                 Some(&mut bytes),
             );
         }
-        let Some(buffer) = host.uav_buffer(bytes) else {
+        let Some(buffer) = ({
+            let _as = crate::ledger::booking_as(crate::ledger::Cat::DepthTwin);
+            host.uav_buffer(bytes)
+        }) else {
             TWINS[1].fetch_add(1, Relaxed);
             return None;
         };
@@ -559,6 +563,7 @@ fn twin_texture(
             tracing::warn!(error = %e, desc = ?d, "no twin for a depth plane");
         }
         texture.map(|texture| {
+            crate::ledger::book(&texture, crate::ledger::Cat::DepthTwin);
             crate::host::name(&texture, || {
                 format!("depth plane twin {}x{} f{}", d.width, d.height, d.format)
             });
@@ -1417,7 +1422,6 @@ pub(crate) fn room() -> bool {
 /// `VICTORY_TEXTURE_SWEEP=0` lets nothing go.
 #[cfg(windows)]
 pub(crate) fn let_go_idle() {
-    use std::sync::atomic::Ordering::Relaxed;
     const IDLE_FRAMES: u64 = 4;
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_SWEEP").is_none_or(|v| v != "0")) {
@@ -1429,38 +1433,12 @@ pub(crate) fn let_go_idle() {
     let (mut went, mut bytes, mut first) = (0u64, 0u64, None);
     let all = textures();
     for &at in all.iter() {
-        // SAFETY: a texture leaves the table before it is freed, under the
-        // lock held here (`Drop for Resource`).
-        let r = unsafe { &*(at as *const Resource) };
-        if !fills(&r.desc) || crate::texture::host_wrote(at) {
-            continue;
-        }
-        let gone = {
-            let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
-            let idle = made.as_ref().is_some_and(|(host, _)| {
-                crate::host::long_ago(r.host.used.load(Relaxed), idle_ms, IDLE_FRAMES)
-                    && std::sync::Arc::strong_count(host) == 1
-                    && crate::host::references(&host.texture) == 1
-            });
-            if idle {
-                // Under the lock: the next use must not find the staging
-                // state of the texture let go (it says "uploaded").
-                crate::texture::unstage(at as This);
-                made.take()
-            } else {
-                None
-            }
-        };
-        if let Some((host, _)) = gone {
-            r.host.gone.store(true, Relaxed);
-            KINDS[2].fetch_add(1, Relaxed);
-            KINDS[3].fetch_add(host.bytes, Relaxed);
+        if let Some(gone) = let_go(at, idle_ms, IDLE_FRAMES) {
             went += 1;
-            bytes += host.bytes;
+            bytes += gone;
             if first.is_none() {
                 first = Some(at);
             }
-            crate::host::retire(host);
         }
     }
     if went > 0 {
@@ -1472,6 +1450,110 @@ pub(crate) fn let_go_idle() {
             )
         });
     }
+}
+
+/// Lets go of the host copy of title texture `at` if it may go: the title
+/// fills it and the host never wrote it, only the resource holds it (no
+/// list, no slot), and nothing asked for it for `idle_ms` and `frames`
+/// frames ([`let_go_idle`] says why each). Its bytes if it went. The host
+/// texture itself is dropped once the submissions running now have
+/// finished (`crate::host::retire`).
+#[cfg(windows)]
+fn let_go(at: usize, idle_ms: u64, frames: u64) -> Option<u64> {
+    use std::sync::atomic::Ordering::Relaxed;
+    // SAFETY: a texture leaves the table before it is freed, under the
+    // lock the caller's `textures()` holds.
+    let r = unsafe { &*(at as *const Resource) };
+    if !fills(&r.desc) || crate::texture::host_wrote(at) {
+        return None;
+    }
+    let gone = {
+        let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+        let idle = made.as_ref().is_some_and(|(host, _)| {
+            crate::host::long_ago(r.host.used.load(Relaxed), idle_ms, frames)
+                && std::sync::Arc::strong_count(host) == 1
+                && crate::host::references(&host.texture) == 1
+        });
+        if !idle {
+            return None;
+        }
+        // Under the lock: the next use must not find the staging state of
+        // the texture let go (it says "uploaded").
+        crate::texture::unstage(at as This);
+        made.take()?
+    };
+    let (host, _) = gone;
+    r.host.gone.store(true, Relaxed);
+    KINDS[2].fetch_add(1, Relaxed);
+    KINDS[3].fetch_add(host.bytes, Relaxed);
+    let bytes = host.bytes;
+    crate::host::retire(host);
+    Some(bytes)
+}
+
+/// Under pressure (`crate::residency`): gives up idle host copies of
+/// textures the title fills, least recently used first, until the card is
+/// back under its target, instead of waiting for the next sweep (once a
+/// second) and then letting every idle one go. At most every quarter of a
+/// second. A texture used in the last second, or held by a list or a slot,
+/// stays: the second protects one a thread has just been handed and not
+/// yet recorded (as in [`let_go_idle`]).
+#[cfg(windows)]
+pub(crate) fn reclaim() {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    const PROTECT_MS: u64 = 1000;
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = crate::host::now_ms();
+    let last = LAST.load(Relaxed);
+    if now < last + 250 || LAST.compare_exchange(last, now, Relaxed, Relaxed).is_err() {
+        return;
+    }
+    // What the last reclaim gave up shows in the system's figures only once
+    // the submissions that used it have finished and the device has
+    // destroyed it: counted as gone for a second, or every quarter second
+    // would give up the same bytes again.
+    static FREED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+    let recent = if now < FREED[1].load(Relaxed) + 1000 { FREED[0].load(Relaxed) } else { 0 };
+    let need = crate::residency::need().0.saturating_sub(recent);
+    if need == 0 {
+        return;
+    }
+    let all = textures();
+    let mut candidates = Vec::new();
+    let mut at_of = Vec::new();
+    for &at in all.iter() {
+        // SAFETY: as in `let_go`.
+        let r = unsafe { &*(at as *const Resource) };
+        if !fills(&r.desc) || crate::texture::host_wrote(at) {
+            continue;
+        }
+        let made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((host, _)) = made.as_ref() else {
+            continue;
+        };
+        let used = r.host.used.load(Relaxed);
+        let held = std::sync::Arc::strong_count(host) != 1
+            || crate::host::references(&host.texture) != 1
+            || !crate::host::long_ago(used, PROTECT_MS, 1);
+        candidates.push(sixth_memory::residency::Candidate {
+            class: sixth_memory::residency::Class::Streamed,
+            bytes: host.bytes,
+            last_frame: used >> 32,
+            last_fence: 0,
+            held,
+        });
+        at_of.push(at);
+    }
+    let mut freed = 0;
+    for i in crate::residency::evict(need, &candidates) {
+        if let Some(bytes) = let_go(at_of[i], PROTECT_MS, 1) {
+            crate::residency::RECLAIMED[0].fetch_add(1, Relaxed);
+            crate::residency::RECLAIMED[1].fetch_add(bytes, Relaxed);
+            freed += bytes;
+        }
+    }
+    FREED[0].store(freed, Relaxed);
+    FREED[1].store(now, Relaxed);
 }
 
 /// For the memory line: title textures with a host copy the host renders
@@ -1708,26 +1790,58 @@ fn host_texture(
         }
         value
     });
-    let heap = D3D12_HEAP_PROPERTIES {
-        Type: D3D12_HEAP_TYPE_DEFAULT,
-        ..Default::default()
+    // Where it goes (`crate::residency`): the card's memory while there is
+    // room; a texture the title fills goes to the PC's memory when there is
+    // none, rather than not being made. One the GPU writes stays on the card.
+    let class = if d.flags & (TARGET | UNORDERED | DEPTH) != 0 {
+        sixth_memory::residency::Class::Written
+    } else if fills(desc) {
+        sixth_memory::residency::Class::Streamed
+    } else {
+        sixth_memory::residency::Class::Read
     };
+    // SAFETY: a plain query; the description has the host layout.
+    let bytes = unsafe { host.device.GetResourceAllocationInfo(0, &[std::ptr::from_ref(&d).cast::<D3D12_RESOURCE_DESC>().read()]) }.SizeInBytes;
+    let placement = match crate::residency::place(class, bytes) {
+        sixth_memory::residency::Placement::System => sixth_memory::residency::Placement::System,
+        // Refused for the pass that makes textures picked by index, which
+        // asks first; made on the card here, as before.
+        _ => sixth_memory::residency::Placement::Local,
+    };
+    let system = placement == sixth_memory::residency::Placement::System;
     let allocate = |d: &ResourceDesc, clear: Option<&[u32; 5]>| {
-        let mut texture: Option<ID3D12Resource> = None;
-        // SAFETY: the description and clear value have the host layout.
-        unsafe {
-            host.device.CreateCommittedResource(
-                &heap,
-                D3D12_HEAP_FLAG_NONE,
-                std::ptr::from_ref(d).cast(),
-                D3D12_RESOURCE_STATES(
-                    crate::host::legal_for(d.flags, crate::host::texture_state(state)) as i32,
-                ),
-                clear.map(|v| std::ptr::from_ref(v).cast()),
-                &mut texture,
-            )
-        }?;
+        let made = |heap: &D3D12_HEAP_PROPERTIES| {
+            let mut texture: Option<ID3D12Resource> = None;
+            // SAFETY: the description and clear value have the host layout.
+            unsafe {
+                host.device.CreateCommittedResource(
+                    heap,
+                    D3D12_HEAP_FLAG_NONE,
+                    std::ptr::from_ref(d).cast(),
+                    D3D12_RESOURCE_STATES(
+                        crate::host::legal_for(d.flags, crate::host::texture_state(state)) as i32,
+                    ),
+                    clear.map(|v| std::ptr::from_ref(v).cast()),
+                    &mut texture,
+                )
+            }
+            .map(|()| texture)
+        };
+        let texture = if system {
+            match made(&crate::residency::texture_heap(placement)) {
+                Ok(Some(t)) => {
+                    crate::residency::TEXTURES_IN_SYSTEM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Some(t)
+                }
+                // Not in the PC's memory (a format the heap refuses): on
+                // the card after all.
+                _ => made(&crate::residency::texture_heap(sixth_memory::residency::Placement::Local))?,
+            }
+        } else {
+            made(&crate::residency::texture_heap(placement))?
+        };
         if let Some(t) = &texture {
+            crate::ledger::book(t, crate::ledger::Cat::Texture);
             crate::host::name(t, || {
                 format!("texture {}x{} f{} flags {:#x}", d.width, d.height, d.format, d.flags)
             });

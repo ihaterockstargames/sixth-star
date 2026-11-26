@@ -257,7 +257,9 @@ pub(crate) fn place(device: &ID3D12Device, heap: &ID3D12Heap, offset: u64, size:
     let flags = D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     // SAFETY: plain creation in a live heap.
     unsafe { device.CreatePlacedResource(heap, offset, &buffer_desc(size, flags), D3D12_RESOURCE_STATE_COMMON, None, &mut placed)? };
-    placed.ok_or_else(windows::core::Error::empty)
+    let placed = placed.ok_or_else(windows::core::Error::empty)?;
+    crate::ledger::book(&placed, crate::ledger::Cat::InPlace);
+    Ok(placed)
 }
 
 // The title's views of its physical pages, as the runtime maps them: the

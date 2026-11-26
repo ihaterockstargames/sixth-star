@@ -1568,10 +1568,24 @@ impl State {
         // makes room again: so the slots are still looked at (the pass
         // returned here, and a slot whose texture had been streamed out
         // kept its host copy for as long as the card was full).
-        let room = crate::resource::room();
+        // Without room on the card (`crate::residency`): idle textures are
+        // given up, least recently used first, and new ones the title fills
+        // are made in the PC's memory, read over the bus but there. Only
+        // when neither pool has room do the slots wait, counted.
+        let mut room = crate::resource::room();
         if !room {
             HEAP_TEXTURES_FULL.fetch_add(1, Ordering::Relaxed);
-            once!("textures picked by index: the card has no room for more; they wait");
+            crate::resource::reclaim();
+            room = !matches!(
+                crate::residency::place_probe(sixth_memory::residency::Class::Streamed, 4 << 20),
+                sixth_memory::residency::Placement::Refuse(_)
+            );
+            if room {
+                once!("textures picked by index: the card has no room for more; new ones go to the PC's memory");
+            } else {
+                crate::residency::REFUSED.fetch_add(1, Ordering::Relaxed);
+                once!("textures picked by index: no room on the card nor in the PC's shared memory; they wait");
+            }
         }
         let mut refused = 0;
         // Slots whose texture's memory the runtime mapped, unmapped or

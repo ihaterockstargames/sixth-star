@@ -44,6 +44,10 @@ mod session;
 #[cfg(windows)]
 mod sysprof;
 #[cfg(windows)]
+mod ledger;
+#[cfg(windows)]
+mod residency;
+#[cfg(windows)]
 mod host;
 #[cfg(windows)]
 mod indirect;

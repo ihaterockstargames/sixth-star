@@ -3530,7 +3530,10 @@ impl Host {
         let mut whole: Vec<Arc<crate::shadow::Shadow>> = Vec::new();
         for (shadow, _) in &declared {
             if shadow.card_make_before(|size| {
-                let before = self.uav_buffer(crate::shadow::card_hash_bytes(size))?;
+                let before = {
+                    let _as = crate::ledger::booking_as(crate::ledger::Cat::CardBefore);
+                    self.uav_buffer(crate::shadow::card_hash_bytes(size))?
+                };
                 name(&before, || "title buffer on the card, hashes of its pieces".into());
                 Some(before)
             }) {
@@ -6317,7 +6320,7 @@ impl Host {
             )
         };
         match made {
-            Ok(()) => buffer,
+            Ok(()) => buffer.inspect(|b| crate::ledger::book(b, crate::ledger::Cat::Readback)),
             Err(e) => {
                 tracing::warn!(error = %e, size, "no read-back buffer");
                 None
@@ -6364,7 +6367,7 @@ impl Host {
                 })
         };
         match made {
-            Ok(()) => Some((buffer?, data.cast())),
+            Ok(()) => buffer.inspect(|b| crate::ledger::book(b, crate::ledger::Cat::Upload)).map(|b| (b, data.cast())),
             Err(e) => {
                 tracing::warn!(error = %e, size, "no upload buffer");
                 None
@@ -6759,6 +6762,10 @@ impl Meter {
             tracing::info!("{line}");
         }
         if let Some(line) = crate::sysprof::line() {
+            tracing::info!("{line}");
+        }
+        tracing::info!("{}", crate::ledger::line());
+        if let Some(line) = crate::residency::line() {
             tracing::info!("{line}");
         }
         let incomplete = crate::draw::drop_line(frames);
@@ -7355,7 +7362,7 @@ impl Host {
                 })
         };
         match made {
-            Ok(()) => Some((buffer?, data.cast())),
+            Ok(()) => buffer.inspect(|b| crate::ledger::book(b, crate::ledger::Cat::Internal)).map(|b| (b, data.cast())),
             Err(e) => {
                 tracing::warn!(error = %e, size, "no shared buffer");
                 None
@@ -7399,7 +7406,7 @@ impl Host {
             )
         };
         match made {
-            Ok(()) => buffer,
+            Ok(()) => buffer.inspect(|b| crate::ledger::book(b, crate::ledger::Cat::Internal)),
             Err(e) => {
                 tracing::warn!(error = %e, size, "no unordered-access buffer");
                 None

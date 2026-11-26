@@ -125,7 +125,7 @@ pub(crate) fn line() -> Option<String> {
     let wall = now.wall.saturating_sub(b.wall);
     let (process_cores, process_share) = cores(now.process.saturating_sub(b.process), wall, logical);
     text.push_str(&format!(
-        "; texture copies refused for lack of room {}; the process kept {process_cores:.2} of {logical} logical cores busy \
+        "; texture passes that found the card past its target {} (see residency:); the process kept {process_cores:.2} of {logical} logical cores busy \
          ({process_share:.0}%)",
         now.refused.saturating_sub(b.refused)
     ));
