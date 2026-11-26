@@ -323,7 +323,8 @@ fn window_card_for(size: u64) -> Option<ID3D12Resource> {
 }
 
 /// The most bytes of host copies that move to the card's memory once they
-/// are hot (`VICTORY_HOT_WINDOWS_MB`; 0, the default, none: the A/B switch
+/// are hot (`VICTORY_HOT_WINDOWS_MB`, or `auto` for as many as the card has
+/// room for; 0, the default, none: the A/B switch
 /// until a run has measured it, ADR 0003 section 5.2). It covers windows of
 /// title memory outside buffers and copies of title buffers shaders cannot
 /// write, by one rule (`sixth_memory::residency::Residency::copy_home`).
@@ -359,8 +360,12 @@ fn hot_most() -> u64 {
         return mb << 20;
     }
     static MOST: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *MOST.get_or_init(|| {
-        std::env::var("VICTORY_HOT_WINDOWS_MB").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0) << 20
+    *MOST.get_or_init(|| match std::env::var("VICTORY_HOT_WINDOWS_MB").ok().as_deref().map(str::trim) {
+        // No bytes of their own: only the card's room (`promotable`) limits
+        // them, and under pressure they go back before textures do.
+        Some("auto") => u64::MAX >> 1,
+        Some(mb) => mb.parse::<u64>().unwrap_or(0) << 20,
+        None => 0,
     })
 }
 
