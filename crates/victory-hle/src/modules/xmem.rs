@@ -177,6 +177,7 @@ pub extern "system" fn XMemVirtualAlloc(
     flags: u64,
     protect: u32,
 ) -> *mut c_void {
+    let console_protect = protect;
     note_class(
         MemoryClass::Virtual {
             protect: protect & !HOST_PROTECTION,
@@ -287,6 +288,8 @@ pub extern "system" fn XMemVirtualAlloc(
     if !at.is_null() {
         // All of it is GPU-reachable here (see `XMemVirtualQuery`).
         victory_gpu::addr::note_title_range(at as u64, size as u64, "XMemVirtualAlloc");
+        // The console's kind of this memory, for the Gen 2 census.
+        victory_gpu::title_memory_kind(at as usize, size, console_protect);
     }
     at
 }

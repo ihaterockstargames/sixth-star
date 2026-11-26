@@ -3196,6 +3196,8 @@ fn hand_back(back: &[Declared]) {
         for ((shadow, from, to), found) in work.iter().zip(found) {
             let written = shadow.copy_back_with(*from, to - from, Some(found));
             COPY_BACK[1].fetch_add(written as u64, Ordering::Relaxed);
+            crate::census::note(crate::census::Flow::BackCompared, *from, to - from);
+            crate::census::note_part(crate::census::Flow::BackWritten, *from, to - from, written);
             #[cfg(feature = "diagnostics")]
             crate::copystat::compared(*from, to - from, written);
         }
@@ -3228,6 +3230,8 @@ fn hand_back(back: &[Declared]) {
         for (from, to) in spans {
             let written = shadow.copy_back(from, to - from);
             COPY_BACK[1].fetch_add(written as u64, Ordering::Relaxed);
+            crate::census::note(crate::census::Flow::BackCompared, from, to - from);
+            crate::census::note_part(crate::census::Flow::BackWritten, from, to - from, written);
             #[cfg(feature = "diagnostics")]
             crate::copystat::compared(from, to - from, written);
         }
@@ -5876,6 +5880,7 @@ impl Batch {
         let started = std::time::Instant::now();
         let copied = shadow.update(from, to - from);
         let us = started.elapsed().as_micros() as u64;
+        crate::census::note_part(crate::census::Flow::Refreshed, from, to - from, copied);
         #[cfg(feature = "diagnostics")]
         crate::copystat::range(from, to - from, us, 0);
         PREPARING[0].fetch_add(us, Ordering::Relaxed);
@@ -6744,6 +6749,9 @@ impl Meter {
             tracing::info!("{line}");
         }
         if let Some(line) = crate::cpuprof::line(frames) {
+            tracing::info!("{line}");
+        }
+        if let Some(line) = crate::census::line(frames) {
             tracing::info!("{line}");
         }
         let incomplete = crate::draw::drop_line(frames);

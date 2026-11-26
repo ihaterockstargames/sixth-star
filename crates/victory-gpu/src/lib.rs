@@ -30,6 +30,8 @@ pub mod ffx;
 pub mod fence;
 pub mod frame;
 #[cfg(windows)]
+mod census;
+#[cfg(windows)]
 mod cpuprof;
 #[cfg(windows)]
 mod gpuprof;
@@ -68,6 +70,8 @@ mod texture;
 #[cfg(windows)]
 mod watch;
 
+#[cfg(windows)]
+pub use census::title_memory_kind;
 #[cfg(windows)]
 pub use host::on_failure;
 #[cfg(windows)]
