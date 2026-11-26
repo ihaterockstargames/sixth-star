@@ -209,6 +209,19 @@ pub(crate) fn pool_bytes(pool: Pool) -> u64 {
     (0..CATS).map(|c| ALIVE[c][pool as usize][2].load(Relaxed)).sum()
 }
 
+/// Alive now, every category and pool: resources and allocated bytes.
+#[cfg(test)]
+pub(crate) fn alive_total() -> (u64, u64) {
+    let (mut count, mut bytes) = (0, 0);
+    for cat in &ALIVE {
+        for pool in cat {
+            count += pool[0].load(Relaxed);
+            bytes += pool[2].load(Relaxed);
+        }
+    }
+    (count, bytes)
+}
+
 fn mib(b: u64) -> f64 {
     b as f64 / (1u64 << 20) as f64
 }

@@ -40,13 +40,30 @@ use crate::object::guid as iid;
 
 /// A title list ready to record, on an allocator of its own.
 fn new_list() -> This {
+    new_pair().1
+}
+
+/// A title allocator and a list on it, ready to record.
+fn new_pair() -> (This, This) {
     let null = std::ptr::null();
     let allocator_iid = iid(0x6102dee4, 0xaf59, 0x4b09, [0xb9, 0x99, 0xb4, 0x4d, 0x73, 0xf0, 0x9b, 0x24]);
     let list_iid = iid(0x5b160d0f, 0xac1b, 0x4185, [0x8b, 0xa8, 0xb3, 0xae, 0x42, 0xa5, 0xa4, 0x55]);
     let (mut allocator, mut list) = (null, null);
     assert_eq!(crate::list::create_allocator(null, 0, &allocator_iid, &mut allocator), 0);
     assert_eq!(crate::list::create_list(null, 0, 0, allocator, null, &list_iid, &mut list), 0);
-    list
+    (allocator, list)
+}
+
+/// After the title's fence said its last run is done: the allocator and the
+/// list reset for the next frame, as a title reuses them.
+fn reuse(pair: (This, This)) {
+    type ResetAllocator = extern "system" fn(This) -> i32;
+    type ResetList = extern "system" fn(This, This, This) -> i32;
+    // SAFETY: Reset of a title allocator (slot 8) and of a title list (slot 10).
+    unsafe {
+        assert_eq!(method::<ResetAllocator>(pair.0, 0x40)(pair.0), 0);
+        assert_eq!(method::<ResetList>(pair.1, 0x50)(pair.1, pair.0, std::ptr::null()), 0);
+    }
 }
 
 /// One submission of one list holding `copies` (to, from, bytes).
@@ -880,9 +897,12 @@ fn late_child() {
     const LEN: usize = (SIDE * SIDE * 4) as usize;
     const PER: usize = 8;
     const SUBMISSIONS: usize = 8;
-    const FRAMES: u64 = 30;
+    // `SIXTH_BENCH_FRAMES`: more frames, for a soak (the host's memory is
+    // then checked not to grow).
+    let frames: u64 = std::env::var("SIXTH_BENCH_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
     const COUNTED: u64 = 10;
     let hot = std::env::var("SIXTH_BENCH_HOT_MB").ok().and_then(|v| v.parse::<u64>().ok());
+    let mut alive_at_start = None;
     let null = std::ptr::null();
     let queue_iid = iid(0x0ec870a6, 0x5d7e, 0x4c22, [0x8c, 0xfc, 0x5b, 0xaa, 0xe0, 0x76, 0x16, 0xed]);
     let fence_iid = iid(0x0a753dcf, 0xc4d8, 0x4b91, [0xad, 0xf6, 0xbe, 0x5a, 0x60, 0xd9, 0x5a, 0x76]);
@@ -914,8 +934,14 @@ fn late_child() {
     let mut value = 0u64;
     let (sent_before, _) = crate::host::late_counts();
     let mut sent_counted = 0;
-    for f in 0..FRAMES {
-        if f == FRAMES - COUNTED {
+    // One allocator and list per submission of the frame, reset and used
+    // again every frame, as a title does.
+    let pairs: Vec<(This, This)> = (0..SUBMISSIONS).map(|_| new_pair()).collect();
+    for f in 0..frames {
+        if f > 0 {
+            pairs.iter().for_each(|&p| reuse(p));
+        }
+        if f == frames - COUNTED {
             let _ = crate::cpuprof::take();
         }
         crate::shadow::test_hot(hot, Some(500_000 + f));
@@ -933,7 +959,7 @@ fn late_child() {
                     }
                 }
             }
-            let list = new_list();
+            let list = pairs[s].1;
             for i in s * PER..(s + 1) * PER {
                 let rows = Footprint { offset: 0, format: 28, width: SIDE, height: SIDE, depth: 1, row_pitch: SIDE * 4 };
                 let to = Location { resource: textures[i], kind: 0, footprint: Footprint { offset: 0, ..rows } };
@@ -957,7 +983,10 @@ fn late_child() {
         }
         let took = began.elapsed().as_secs_f64() * 1e3;
         let us = crate::host::take_submission_us();
-        if f >= FRAMES - COUNTED {
+        if f == 50.min(frames / 2) {
+            alive_at_start = Some(crate::ledger::alive_total());
+        }
+        if f >= frames - COUNTED {
             times.push(took);
             split[0] += us[0];
             split[1] += us[1];
@@ -966,6 +995,14 @@ fn late_child() {
     }
     assert_eq!(crate::descriptor::host::device_removed(), None);
     let _ = sent_before;
+    // Over a soak, what the host has alive does not grow (count, bytes).
+    if frames >= 500
+        && let Some((count, bytes)) = alive_at_start
+    {
+        let (now_count, now_bytes) = crate::ledger::alive_total();
+        println!("LATE-SOAK alive from frame 50 to {frames}: {count} -> {now_count} resources, {} -> {} MiB", bytes >> 20, now_bytes >> 20);
+        assert!(now_bytes <= bytes + (64 << 20), "the host's memory grew from {} to {} MiB", bytes >> 20, now_bytes >> 20);
+    }
     // The textures hold the buffers' bytes as the title left them: eight of
     // them read back from the card, every row compared.
     {
