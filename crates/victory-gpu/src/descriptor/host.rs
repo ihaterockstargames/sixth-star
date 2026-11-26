@@ -1890,7 +1890,7 @@ fn cut_views() -> bool {
 /// from the title memory next to it still read 0 here. That needs a copy that
 /// covers the whole view (a resource registry that grows copies to their
 /// views).
-fn fit_to_copy(format: DXGI_FORMAT, first: u64, count: u32, stride: u32, raw: bool, width: u64) -> u32 {
+pub(crate) fn fit_to_copy(format: DXGI_FORMAT, first: u64, count: u32, stride: u32, raw: bool, width: u64) -> u32 {
     let Some(element) = view_element(format, first, stride, raw) else {
         return count;
     };

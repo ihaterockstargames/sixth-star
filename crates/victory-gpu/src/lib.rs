@@ -31,6 +31,8 @@ pub mod fence;
 pub mod frame;
 #[cfg(windows)]
 mod census;
+#[cfg(all(test, windows))]
+mod viewcut_tests;
 #[cfg(windows)]
 mod cpuprof;
 #[cfg(windows)]
