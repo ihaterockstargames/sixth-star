@@ -55,18 +55,56 @@ The proportions are not known yet. The ledger (§4) prints them on the frame lin
    - the texture pass makes each such slot again from the new copy on the card (`HostHeap::shows_stale`, `HostHeap::remake`). Until then the slot holds and shows the old copy, so nothing reads a texture that has gone.
    - `VICTORY_PROMOTE=0` turns it off. The residency line counts the textures that came back and the slots made again.
    - Tests on the device: `a_texture_made_in_the_pcs_memory_comes_back_to_the_card` and `a_slot_showing_a_copy_given_up_is_made_again_from_the_new_one`.
-2. **Hot windows on the card (done, off by default).** `VICTORY_HOT_WINDOWS_MB=<MB>`:
-   - a window outside buffers that draws asked for in 8 frames in a row is made again with a card side (the `Card` machinery title buffers of 16 MiB or more use);
-   - only while the card has room (`promotable`), at most 64 MiB a frame, and only if no descriptor slot views the window (a slot would keep showing the old copy);
-   - lists recorded with the old copy keep it until they are reset.
-   - The cost: what the title writes in such a window goes up to the card once before each submission, where draws read it over the bus as often as they read it. A window the title rewrites whole every frame and draws read once gains nothing. Hence off until the maintainer's A/B.
-   - Test on the device: `a_window_asked_for_frame_after_frame_moves_to_the_card`.
-   - Still to do: title-buffer copies under 16 MiB by the same rule (they need the card compare, since shaders write some), and windows a slot views (their slots made again, as for textures).
+2. **One rule for host copies (done, off by default: `VICTORY_HOT_WINDOWS_MB=<MB>`).** `sixth_memory::residency::Residency::copy_home` decides for windows and title-buffer copies alike (`274f873`, `9a969c0`):
+   - a copy moves to the card once it has been used 8 frames in a row, while the card has room (`promotable`), at most 64 MiB a frame, up to the MB given;
+   - never title memory opened in place, never while submissions may be in flight (late wait);
+   - a copy shaders may write (an unordered-access title buffer, or writes were ever declared) moves only when nothing but the map has it.
+   - **Slots.** A draw finds a slot's copy afresh by address, while the slot keeps the buffer it was made with. So the replaced copy stays as the new one's *twin* while a slot shows it or a list holds it.
+     - Every refresh of either copy copies into both (`Shadow::copy`).
+     - A draw that reads such a slot remakes it from the new copy (`HostHeap::shows_replaced`, `remake`).
+     - The sweep lets the twin go once nothing shows or holds it.
+     - If shaders ever write a twinned copy, the other takes that range again from title memory once it is back there (`twin_wrote`). A read of the other copy in the same submission would see the old bytes; it is counted on the residency line.
+   - **Placement when made** (`80556df`): below the inherited 16 MiB, only writable copies go to the card when made (`VICTORY_CARD_BUFFERS_MIN_MB`). Read-only ones are left to the rule above. Placed first, they had taken the bytes the big writable ones needed.
+   - **Copy-back noting** (`bb57383`, on by default, `VICTORY_BACK_NOTE=0` off): a 64 KiB page a copy-back wrote whole, and which the copy held as current before, is noted current instead of being copied back into the same copy at the next refresh.
+   - Device tests: `a_window_asked_for_frame_after_frame_moves_to_the_card`, `a_hot_read_only_buffer_moves_and_a_writable_one_stays`, `a_slot_showing_a_copy_that_moved_is_made_again_from_the_card_copy`, `a_copy_back_notes_current_only_whole_pages_the_copy_held`.
+   - Still to do: noting for card merges; a writable copy that a list holds (it needs the move to happen when no list recorded but not yet submitted names it).
+
+### Synthetic measurements (RTX 3070, 2026-11-26, through the host's own paths)
+
+`residency_bench`: 512 read-only 4 MiB title buffers in write-watched memory, all read by a compute pass each frame (2 GiB), the title rewriting 1% of their pages:
+
+| hot budget MiB | on the card | ms/frame | preparing | on the GPU |
+|---|---|---|---|---|
+| 0 | 0 | 89.1 | 5.8 | 82.7 |
+| 512 | 128 | 70.9 | 6.4 | 63.2 |
+| 1024 | 256 | 51.6 | 6.4 | 44.4 |
+| 2048 | 512 | 15.8 | 9.5 | 8.0 |
+
+At 25% rewritten the GPU time falls 82 → 28 ms (what changed goes up once), but preparing stays at 77 ms: the CPU copy of the rewritten pages.
+
+`copyback_bench`: 512 MiB declared written per frame, 1% of its pages written. 4 MiB copies in the PC's memory cost 82 ms preparing (the snapshot) plus 66 ms copying back (the CPU compare). On the card, 13 + 5 + 14 ms: 4.5×. With 10% of pages written in a scattered pattern, every 64 KiB piece is fetched and the gain is small.
+
+`frame_bench`, a frame shaped like the game's measured one:
+- 1 GiB read-only buffers read whole, 2% rewritten by the title;
+- 64 writable 4 MiB and 8 writable 16 MiB buffers, 2% written by shaders in dense blocks, every write checked in title memory;
+- lists kept two frames, as the title keeps them.
+
+| switches | ms/frame | preparing | on the GPU | copying back |
+|---|---|---|---|---|
+| defaults | 109.0 | 40.4 | 42.4 | 28.0 |
+| `VICTORY_HOT_WINDOWS_MB=1024` | 77.4 | 45.1 | 4.3 | 30.6 |
+| `VICTORY_CARD_BUFFERS_MIN_MB=1` (`_MB=1024`) | 54.0 | 7.0 | 43.2 | 3.8 |
+| both (`ab.bat` `best`) | 18.5 | 8.3 | 5.6 | 3.9 |
+| keep snapshots + wide copy-back | 66.0 | 6.5 | 42.2 | 17.4 |
+| late wait 3 | 109.9 | 42.0 | 42.8 | 27.6 |
+
+"Both" is 6× faster in this model. Whether the title's memory behaves like it is what the maintainer's A/B (`ab.bat`) says.
+
 3. **Suballocation** of small copies (each is its own committed resource today), following D3D12MA's model of placed resources in large heaps.
 4. **Registry-tracked residency.** Every use known before submission, then `Evict`/`MakeResident` with LRU by submission (D3DX12Residency's model) instead of release-and-remake.
 
 ## 6. Gates
 
 - **Before any default changes:** the frame line's `host memory alive`, `residency:` and `INCOMPLETE FRAMES` lines from the maintainer's run.
-- **Hot windows:** `VICTORY_HOT_WINDOWS_MB` becomes a default only after an A/B in the maintainer's run (same scene, with and without), comparing `ms/frame`, `on the GPU`, the copies line and `INCOMPLETE FRAMES`.
+- **Hot copies and card buffers:** `VICTORY_HOT_WINDOWS_MB` and `VICTORY_CARD_BUFFERS_MIN_MB=1` become defaults only after the maintainer's A/B (`ab.bat`: `baseline`, `best`, `hot1024`, `cardbuf1`, same scene), comparing `ms/frame`, `on the GPU`, `copying back`, `INCOMPLETE FRAMES`, errors and the picture.
 - **Fallback:** `VICTORY_RESIDENCY=0` restores the inherited rule (no texture made past nine tenths of the budget, none given up early, none in the PC's memory) for an A/B. A missing texture is a correctness bug, so the fallback stays the default unless it causes worse ones.
