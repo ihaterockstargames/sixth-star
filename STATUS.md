@@ -44,7 +44,11 @@ minutes or more without a crash; that has not been reached or measured.
   console DirectStorage HLE (CPU zlib/BCPack), BCPack tables found, ReBAR
   enabled.
 - `run.bat rebar`: `rebar: BAR1 8192 MiB / VRAM 8192 MiB`, `rebar: enabled`.
-- `DISPLAY_MODE`: 1920x1080 (the default).
+- `DISPLAY_MODE`: 1920x1080 (the default for the measurements below). Since
+  `77f603b` the runner also has `OUTPUT_MODE` (empty: the window follows the
+  image) and `RENDER_SCALE` (1.0); every measurement so far is native
+  1080p, render scale 1.0, no upscaling. A run at another scale is not
+  measured yet.
 - Other non-default settings: `DRED=1` (more detail on a device removal; a
   little slower). `CONSOLE=series-x`, `PRESET=safe`, `SHADER_OPT=0` are the
   defaults.
