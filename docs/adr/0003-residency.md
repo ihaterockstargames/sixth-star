@@ -1,6 +1,6 @@
 # ADR 0003: residency instead of a cut-off
 
-Status: accepted, first stage implemented (2026-11-26, `121cf0d`, `009dd7a`). Extends ADR 0002 §4.2 and §4.8.
+Status: accepted. First stage implemented on 2026-11-26 (`121cf0d`, `009dd7a`); promotion back to the card (`e2453a4`) and hot windows on the card (`58a30ed`, off by default) added the same day (§5). Extends ADR 0002 §4.2 and §4.8.
 
 ## 1. The problem
 
@@ -46,14 +46,27 @@ The proportions are not known yet. The ledger (§4) prints them on the frame lin
 - **R5. No `Evict`/`MakeResident` yet.** D3D12's `Evict` is a promise that nothing will use the object until it is made resident again. Today a slot or a list may use a texture without asking, so that promise cannot be kept. The registry (ADR 0002 §4.3) makes every use known first; until then, release-and-remake is the only safe eviction.
 - **R6. The fallback must not become the steady state.** A texture in the PC's memory is read at a tenth of the speed. It returns to the card when it is remade with room there.
 
-## 5. What is not done (next steps, in order)
+## 5. Next steps
 
-1. **Promotion back to the card.** When the pressure is Low or Normal, remake textures in the PC's memory on the card. Those a slot holds need their slot views remade (the `descriptor::host::remapped` path). The residency line counts them, so the maintainer's run shows whether they matter.
-2. **VRAM-first for GPU-hot copies.** Windows and title-buffer copies that shaders only read get a card side by heat (submissions using them per second) within a share of the budget. This replaces the fixed 16 MiB and 512 MB limits and the disabled window switch. The card-copy machinery (`Card`) already carries the bytes up; the residency decides who gets it.
+1. **Promotion back to the card (done).** `resource::promote`, from the texture pass, at most every half second:
+   - only while the pressure is Low or Normal, and only up to the target less twice the margin (80%), so that what comes back does not itself raise the pressure (`Residency::promotable`);
+   - most recently used first; not one a list not yet reset holds, one handed out in the last second, or one draws read through a table;
+   - the copy in the PC's memory is given up, and the slots on its memory are made due (`descriptor::host::remapped`);
+   - the texture pass makes each such slot again from the new copy on the card (`HostHeap::shows_stale`, `HostHeap::remake`). Until then the slot holds and shows the old copy, so nothing reads a texture that has gone.
+   - `VICTORY_PROMOTE=0` turns it off. The residency line counts the textures that came back and the slots made again.
+   - Tests on the device: `a_texture_made_in_the_pcs_memory_comes_back_to_the_card` and `a_slot_showing_a_copy_given_up_is_made_again_from_the_new_one`.
+2. **Hot windows on the card (done, off by default).** `VICTORY_HOT_WINDOWS_MB=<MB>`:
+   - a window outside buffers that draws asked for in 8 frames in a row is made again with a card side (the `Card` machinery title buffers of 16 MiB or more use);
+   - only while the card has room (`promotable`), at most 64 MiB a frame, and only if no descriptor slot views the window (a slot would keep showing the old copy);
+   - lists recorded with the old copy keep it until they are reset.
+   - The cost: what the title writes in such a window goes up to the card once before each submission, where draws read it over the bus as often as they read it. A window the title rewrites whole every frame and draws read once gains nothing. Hence off until the maintainer's A/B.
+   - Test on the device: `a_window_asked_for_frame_after_frame_moves_to_the_card`.
+   - Still to do: title-buffer copies under 16 MiB by the same rule (they need the card compare, since shaders write some), and windows a slot views (their slots made again, as for textures).
 3. **Suballocation** of small copies (each is its own committed resource today), following D3D12MA's model of placed resources in large heaps.
 4. **Registry-tracked residency.** Every use known before submission, then `Evict`/`MakeResident` with LRU by submission (D3DX12Residency's model) instead of release-and-remake.
 
 ## 6. Gates
 
 - **Before any default changes:** the frame line's `host memory alive`, `residency:` and `INCOMPLETE FRAMES` lines from the maintainer's run.
+- **Hot windows:** `VICTORY_HOT_WINDOWS_MB` becomes a default only after an A/B in the maintainer's run (same scene, with and without), comparing `ms/frame`, `on the GPU`, the copies line and `INCOMPLETE FRAMES`.
 - **Fallback:** `VICTORY_RESIDENCY=0` restores the inherited rule (no texture made past nine tenths of the budget, none given up early, none in the PC's memory) for an A/B. A missing texture is a correctness bug, so the fallback stays the default unless it causes worse ones.
