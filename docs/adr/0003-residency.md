@@ -69,6 +69,8 @@ The proportions are not known yet. The ledger (§4) prints them on the frame lin
    - Device tests: `a_window_asked_for_frame_after_frame_moves_to_the_card`, `a_hot_read_only_buffer_moves_and_a_writable_one_stays`, `a_slot_showing_a_copy_that_moved_is_made_again_from_the_card_copy`, `a_copy_back_notes_current_only_whole_pages_the_copy_held`.
    - Card merges note their pages too (`1f735a8`): in `frame_bench`'s best configuration, refreshes then copy only what the title wrote (20.5 instead of 31.5 MiB a frame).
    - Moves no longer wait for flights to land (`b0ec57b`). Only a writable copy that something holds stays.
+   - **Demotion** (`ecdf692`): under pressure the reclaim, after idle textures, puts hot copies back into the PC's memory, least recently used first (`shadow::demote`), the same way they moved up. Textures come first, since a texture in the PC's memory is sampled about 9× slower. `pressure_stress` checks it with the card refilled to 93%.
+   - **Texture copies from host copies** (`78d67bc`, `VICTORY_TEXTURE_FROM_COPY=1`, off): a title copy from a buffer into a texture reads the buffer's host copy instead of filling an upload of its own from title memory. `late_bench` 70.6 → 24.7 ms; textures are read back byte-exact in four modes (`c6c84c3`).
    - Still to do: a writable copy that a list holds. It needs the move to happen when no list that is recorded but not yet submitted names it.
 
 ### Synthetic measurements (RTX 3070, 2026-11-26, through the host's own paths)
