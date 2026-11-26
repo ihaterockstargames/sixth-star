@@ -2927,6 +2927,18 @@ pub(crate) mod tests {
         (out, data as u64)
     }
 
+    /// A title buffer of `len` bytes at `address`, memory the caller owns
+    /// (as the title places buffers in memory it mapped itself).
+    pub(crate) fn title_buffer_at(address: u64, len: u64) -> This {
+        let mut out = std::ptr::null();
+        let desc = buffer(len);
+        assert_eq!(
+            create_at_address(std::ptr::null(), address, &desc, 0, std::ptr::null(), &RESOURCE_IIDS[0], &mut out),
+            S_OK
+        );
+        out
+    }
+
     /// The tests that give up copies in the PC's memory (any test's), one
     /// at a time.
     pub(crate) static PROMOTE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());

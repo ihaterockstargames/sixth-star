@@ -213,3 +213,152 @@ fn submissions_in_flight_keep_order_and_lifetime() {
     }
     assert!(failed.is_empty(), "modes that failed: {failed:#?}");
 }
+
+/// Synthetic: the trade-off of hot copies on the card, through the host's
+/// own paths: the copy lookup (with its moves), the copies' write-watch
+/// refreshes and sends to the card at submission, and a submission of our
+/// own run as the title's are (`Host::execute`), whose compute pass reads
+/// every copy whole through a root view, as draws read title memory. Per
+/// frame: 512 read-only title buffers of 4 MiB (2 GiB read by the GPU),
+/// the title rewriting 1% or 25% of their pages, at hot budgets of 0, 256,
+/// 512, 1024 and 2048 MiB. Prints a table; run with
+/// `cargo test -p victory-gpu --release --lib residency_bench -- --ignored --nocapture`.
+#[test]
+#[ignore = "a benchmark (a few minutes, about 6 GiB of memory)"]
+fn residency_bench() {
+    use windows::Win32::Graphics::Direct3D12::*;
+    let Some(host) = crate::host::host() else {
+        return;
+    };
+    const LEN: usize = 4 << 20;
+    const SOURCES: usize = 512;
+    const FRAMES: u64 = 48;
+    const COUNTED: u64 = 12;
+    // SAFETY: object creation on the host's device.
+    let (root, pipeline, out) = unsafe {
+        let device: &ID3D12Device = &host.device;
+        let shader = "ByteAddressBuffer t : register(t0); RWByteAddressBuffer o : register(u0);
+             [numthreads(256, 1, 1)] void main(uint3 id : SV_DispatchThreadID) {
+                 uint4 v = t.Load4(id.x * 16);
+                 o.Store((id.x & 0x3fff) * 4, v.x ^ v.y ^ v.z ^ v.w);
+             }";
+        let code = crate::host::compile(shader, windows::core::s!("main"), windows::core::s!("cs_5_1")).expect("compiled");
+        let params = [
+            D3D12_ROOT_PARAMETER {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_SRV,
+                Anonymous: D3D12_ROOT_PARAMETER_0 { Descriptor: D3D12_ROOT_DESCRIPTOR { ShaderRegister: 0, RegisterSpace: 0 } },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            },
+            D3D12_ROOT_PARAMETER {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_UAV,
+                Anonymous: D3D12_ROOT_PARAMETER_0 { Descriptor: D3D12_ROOT_DESCRIPTOR { ShaderRegister: 0, RegisterSpace: 0 } },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            },
+        ];
+        let desc = D3D12_ROOT_SIGNATURE_DESC { NumParameters: 2, pParameters: params.as_ptr(), ..Default::default() };
+        let mut blob = None;
+        D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &mut blob, None).expect("root signature");
+        let blob = blob.expect("blob");
+        let root: ID3D12RootSignature = device
+            .CreateRootSignature(0, std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize()))
+            .expect("root");
+        let pipeline: ID3D12PipelineState = device
+            .CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                pRootSignature: std::mem::transmute_copy(&root),
+                CS: D3D12_SHADER_BYTECODE { pShaderBytecode: code.as_ptr().cast(), BytecodeLength: code.len() },
+                ..Default::default()
+            })
+            .expect("pipeline");
+        (root, pipeline, host.uav_buffer(64 << 10).expect("out"))
+    };
+    let mut frame_no = 200_000u64;
+    println!("| title rewrites | hot budget MiB | copies on the card | ms/frame | preparing | on the GPU |");
+    println!("|---|---|---|---|---|---|");
+    for dirty_percent in [1usize, 25] {
+        for budget in [0u64, 256, 512, 1024, 2048] {
+            // Title memory as the runtime maps it: write-watched, so that a
+            // refresh copies only the pages the title wrote.
+            // SAFETY: a fresh reservation of our own, released below.
+            let region = unsafe {
+                windows_sys::Win32::System::Memory::VirtualAlloc(
+                    std::ptr::null(),
+                    SOURCES * LEN,
+                    windows_sys::Win32::System::Memory::MEM_RESERVE | windows_sys::Win32::System::Memory::MEM_COMMIT | 0x20_0000,
+                    windows_sys::Win32::System::Memory::PAGE_READWRITE,
+                )
+            } as u64;
+            assert_ne!(region, 0, "a write-watched reservation");
+            let sources: Vec<(This, u64)> = (0..SOURCES as u64)
+                .map(|i| {
+                    let at = region + i * LEN as u64;
+                    (crate::resource::tests::title_buffer_at(at, LEN as u64), at)
+                })
+                .collect();
+            let pages = LEN / crate::watch::PAGE;
+            let mut times = Vec::new();
+            let mut split = [0u64; 2];
+            for f in 0..FRAMES {
+                frame_no += 1;
+                crate::shadow::test_hot((budget > 0).then_some(budget), Some(frame_no));
+                for (i, s) in sources.iter().enumerate() {
+                    for page in 0..pages {
+                        if (page * 131 + i * 17 + f as usize * 7) % 100 < dirty_percent {
+                            // SAFETY: inside the source's own memory.
+                            unsafe { ((s.1 as usize + page * crate::watch::PAGE) as *mut u8).write(f as u8) };
+                        }
+                    }
+                }
+                let _ = crate::host::take_submission_us();
+                let began = std::time::Instant::now();
+                let list = host.new_list().expect("a host list");
+                // SAFETY: recording on our own list, with objects that live
+                // through its submission.
+                unsafe {
+                    list.list.SetComputeRootSignature(&root);
+                    list.list.SetPipelineState(&pipeline);
+                    list.list.SetComputeRootUnorderedAccessView(1, out.GetGPUVirtualAddress());
+                }
+                for s in &sources {
+                    let copy = crate::shadow::find(s.1, LEN as u64).expect("a copy");
+                    copy.refresh(&list, s.1, LEN as u64);
+                    list.buffer_state(&copy.buffer, crate::host::BUFFER_READ);
+                    // SAFETY: as above; the copy's address of the buffer's start.
+                    unsafe {
+                        list.list.SetComputeRootShaderResourceView(0, copy.gpu(s.1));
+                        list.list.Dispatch((LEN / 16 / 256) as u32, 1, 1);
+                    }
+                }
+                list.close();
+                host.execute(&[&list]);
+                let took = began.elapsed().as_secs_f64() * 1e3;
+                let us = crate::host::take_submission_us();
+                if f >= FRAMES - COUNTED {
+                    times.push(took);
+                    split[0] += us[0];
+                    split[1] += us[1];
+                }
+            }
+            assert_eq!(crate::descriptor::host::device_removed(), None);
+            times.sort_by(f64::total_cmp);
+            let carded = sources.iter().filter(|s| crate::shadow::find(s.1, 256).is_some_and(|c| c.carded())).count();
+            let per = |us: u64| us as f64 / 1e3 / COUNTED as f64;
+            println!(
+                "| {dirty_percent}% | {budget} | {carded} of {SOURCES} | {:.1} | {:.1} | {:.1} |",
+                times[times.len() / 2],
+                per(split[0]),
+                per(split[1])
+            );
+            crate::shadow::test_hot(None, None);
+            for s in &sources {
+                // SAFETY: Release of a title buffer we made.
+                (unsafe { method::<Release>(s.0, 0x10) })(s.0);
+            }
+            // The copies go once no submission runs; then the memory.
+            drop(sources);
+            crate::shadow::let_go_idle();
+            // SAFETY: our reservation; nothing of the host reads it now
+            // (its copies were refreshed from it, not mapped onto it).
+            unsafe { windows_sys::Win32::System::Memory::VirtualFree(region as *mut _, 0, windows_sys::Win32::System::Memory::MEM_RELEASE) };
+        }
+    }
+}

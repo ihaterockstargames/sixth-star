@@ -341,8 +341,8 @@ fn window_card_for(size: u64) -> Option<ID3D12Resource> {
 /// and draws read once gains nothing.
 fn hot_most() -> u64 {
     #[cfg(test)]
-    if TEST_HOT.with(std::cell::Cell::get) {
-        return 256 << 20;
+    if let Some(mb) = TEST_HOT.with(std::cell::Cell::get) {
+        return mb << 20;
     }
     static MOST: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *MOST.get_or_init(|| {
@@ -353,15 +353,15 @@ fn hot_most() -> u64 {
 #[cfg(test)]
 thread_local! {
     /// Tests: hot copies move on this thread whatever the switch says.
-    static TEST_HOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_HOT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     /// Tests: the frame this thread's asks are in.
     static TEST_FRAME: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
-/// Tests: hot copies move on this thread (`on`), and its asks are in
-/// `frame`.
+/// Tests: hot copies move on this thread, up to `on` MiB of them, and its
+/// asks are in `frame`.
 #[cfg(test)]
-pub(crate) fn test_hot(on: bool, frame: Option<u64>) {
+pub(crate) fn test_hot(on: Option<u64>, frame: Option<u64>) {
     TEST_HOT.with(|h| h.set(on));
     TEST_FRAME.with(|f| f.set(frame));
 }
@@ -3609,6 +3609,19 @@ pub(crate) fn near(va: u64) -> String {
 mod hot_window_tests {
     use super::{HOT_FRAMES, Shadow, TEST_FRAME, TEST_HOT, WINDOW, card_dirty, find_any, host};
 
+
+    /// Lets the twins go that nothing but submissions running in other
+    /// tests held: what was retired while they ran goes once a submission
+    /// of ours has finished after them.
+    fn twins_settled() {
+        if let Some(host) = host() {
+            let list = host.new_list().expect("a host list");
+            list.close();
+            host.execute(&[&list]);
+        }
+        super::let_go_twins();
+    }
+
     impl Shadow {
         /// As [`Shadow::gpu_writes`] notes it for the twin, without a list.
         fn twin_wrote_by_test(&self, from: usize, to: usize) {
@@ -3628,7 +3641,7 @@ mod hot_window_tests {
         if host().is_none() {
             return; // no host GPU here
         }
-        TEST_HOT.with(|h| h.set(true));
+        TEST_HOT.with(|h| h.set(Some(256)));
         // Title memory of our own, never freed (windows are found by address).
         let memory: &'static [u8] = Vec::leak(vec![7u8; 4 * WINDOW as usize]);
         let at = (memory.as_ptr() as u64).next_multiple_of(WINDOW);
@@ -3659,7 +3672,7 @@ mod hot_window_tests {
         // until it lets go.
         assert!(moved.twin().is_some_and(|t| Arc::ptr_eq(&t, &first)));
         drop(first);
-        super::let_go_twins();
+        twins_settled();
         assert!(moved.twin().is_none(), "nothing has it any more");
         // A slot views the next window: it moves too, and the copy the slot
         // shows is kept as its twin and refreshed with it.
@@ -3696,14 +3709,14 @@ mod hot_window_tests {
         assert!(up.twin().is_some(), "the slot still shows it");
         drop(slot);
         drop(viewed);
-        super::let_go_twins();
+        twins_settled();
         assert!(up.twin_old.lock().unwrap().is_none(), "let go");
         // Asked for with a frame missed: the count starts again.
         let gappy = ask(at + 2 * WINDOW, 3000);
         for frame in (3001..3000 + 2 * HOT_FRAMES).filter(|f| f % 4 != 0) {
             assert!(Arc::ptr_eq(&ask(at + 2 * WINDOW, frame), &gappy), "not in a row, frame {frame}");
         }
-        TEST_HOT.with(|h| h.set(false));
+        TEST_HOT.with(|h| h.set(None));
         TEST_FRAME.with(|f| f.set(None));
     }
 
@@ -3715,7 +3728,7 @@ mod hot_window_tests {
         if host().is_none() {
             return; // no host GPU here
         }
-        TEST_HOT.with(|h| h.set(true));
+        TEST_HOT.with(|h| h.set(Some(256)));
         let ask = |address: u64, frame: u64| {
             TEST_FRAME.with(|f| f.set(Some(frame)));
             super::find(address, 256).expect("a copy")
@@ -3734,14 +3747,14 @@ mod hot_window_tests {
         // The test held the old one: kept as a twin until it lets go.
         assert!(moved.twin().is_some_and(|t| Arc::ptr_eq(&t, &first)));
         drop(first);
-        super::let_go_twins();
+        twins_settled();
         assert!(moved.twin().is_none());
         let writable = ask(wat, 6000);
         for frame in 6001..6000 + 2 * HOT_FRAMES {
             assert!(Arc::ptr_eq(&ask(wat, frame), &writable), "shaders may write it: stays, frame {frame}");
         }
         assert!(!writable.carded());
-        TEST_HOT.with(|h| h.set(false));
+        TEST_HOT.with(|h| h.set(None));
         TEST_FRAME.with(|f| f.set(None));
     }
 }

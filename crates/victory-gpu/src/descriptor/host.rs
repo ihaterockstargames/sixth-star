@@ -2985,7 +2985,7 @@ mod tests {
         let handle = record.as_mut_ptr() as u64;
         let desc: [u32; 10] = [0, 1, 0x1688, 0, 0, 0, 256, 4, 0, 0];
         crate::descriptor::create_srv(std::ptr::null(), buffer, &desc, handle);
-        crate::shadow::test_hot(true, Some(7000));
+        crate::shadow::test_hot(Some(256), Some(7000));
         let view = heap.mirror(2, handle, true).expect("made for a draw");
         let (old, _, _) = buffer_copy(&view).expect("its copy");
         assert!(!old.carded());
@@ -2994,7 +2994,7 @@ mod tests {
         assert!(!heap.shows_replaced(2, &old));
         // Asked for in frame after frame (as draws do): it moves.
         for frame in 7001..=7008 {
-            crate::shadow::test_hot(true, Some(frame));
+            crate::shadow::test_hot(Some(256), Some(frame));
             let _ = crate::shadow::find(at, 256);
         }
         let (new, _, _) = buffer_copy(&view).expect("its copy now");
@@ -3005,7 +3005,7 @@ mod tests {
         assert_eq!(windows::core::Interface::as_raw(&shown), windows::core::Interface::as_raw(&new.buffer));
         assert!(!heap.shows_replaced(2, &new));
         assert_eq!(device_removed(), None);
-        crate::shadow::test_hot(false, None);
+        crate::shadow::test_hot(None, None);
     }
 
     /// The tests that take [`REMAPPED`] and [`OVERFLOWED`], one at a time.

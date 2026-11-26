@@ -417,6 +417,16 @@ pub(crate) fn log_removal_context() {
 static SUBMISSION_US: [std::sync::atomic::AtomicU64; 2] =
     [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
 
+/// Tests: [`SUBMISSION_US`] and [`COPY_BACK`]'s microseconds, taken.
+#[cfg(test)]
+pub(crate) fn take_submission_us() -> [u64; 3] {
+    [
+        SUBMISSION_US[0].swap(0, Ordering::Relaxed),
+        SUBMISSION_US[1].swap(0, Ordering::Relaxed),
+        COPY_BACK[0].swap(0, Ordering::Relaxed),
+    ]
+}
+
 /// After submissions: shader-written ranges compared and copied back into
 /// title memory (microseconds, bytes that differed), since the last
 /// frame-rate line.
