@@ -2928,6 +2928,11 @@ impl Shadow {
         to - from
     }
 
+    /// Whether it is title memory opened as a heap, not a copy.
+    pub(crate) fn in_place(&self) -> bool {
+        self.place.is_some()
+    }
+
     /// Whether shaders read and write this copy in the card's own memory
     /// ([`cards`]).
     pub(crate) fn carded(&self) -> bool {

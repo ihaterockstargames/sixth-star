@@ -813,6 +813,24 @@ fn buffer_range(buffer: This, offset: u64, len: u64) -> Option<*mut u8> {
     Some(unsafe { data.add(offset as usize) })
 }
 
+/// Whether a title copy from a buffer into a texture reads the buffer's
+/// host copy (`VICTORY_TEXTURE_FROM_COPY=1`; off by default until the
+/// maintainer's A/B): brought up to date as any copy is, by the pages the
+/// title wrote, and holding what shaders wrote earlier in the submission.
+/// Without it each such copy fills an upload buffer of its own from title
+/// memory, all of the footprint's bytes, on the submitting thread: 4 MiB a
+/// copy, 256 MiB a frame in `late_bench`. A copy in place, or at an
+/// offset the host's placement alignment (512 bytes) does not allow, goes
+/// the old way.
+fn texture_from_copy() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_FROM_COPY").is_some_and(|v| v == "1"))
+}
+
+/// Since the start: title copies into textures made from the source's host
+/// copy ([`texture_from_copy`]).
+pub(crate) static TEXTURES_FROM_COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Buffer to buffer: both are host memory, copied at submission.
 extern "system" fn copy_buffer_region(
     this: This,
@@ -975,6 +993,23 @@ extern "system" fn copy_texture_region(
             let Some(data) = buffer_range(src.resource, src.footprint.offset, bytes) else {
                 return;
             };
+            // From the source buffer's own host copy (`texture_from_copy`).
+            let copy = texture_from_copy()
+                .then(|| crate::shadow::find(data as u64, bytes))
+                .flatten()
+                .filter(|c| !c.in_place())
+                .and_then(|c| {
+                    let fits = c.left(data as u64) >= bytes;
+                    c.offset_in(data as u64).filter(|o| fits && o % 512 == 0).map(|o| (c, o))
+                });
+            if let Some((copy, offset)) = copy {
+                copy.refresh(list, data as u64, bytes);
+                list.buffer_state(&copy.buffer, COPY_SOURCE);
+                from.resource = copy.buffer.as_raw().cast_const().cast();
+                from.footprint.offset = offset;
+                _upload = copy.buffer.clone();
+                TEXTURES_FROM_COPIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
             let Some((buffer, staging)) = list.upload(host, bytes) else {
                 return;
             };
@@ -989,6 +1024,7 @@ extern "system" fn copy_texture_region(
                 read = Some((unsafe { buffer.GetGPUVirtualAddress() }, bytes));
             }
             _upload = buffer;
+            }
         } else {
             let Some(texture) = crate::resource::host_resource(src.resource) else {
                 return;

@@ -3168,6 +3168,29 @@ pub(crate) mod tests {
             let at = row * 256;
             assert_eq!(read[at..at + 16], bytes[at..at + 16], "row {row}");
         }
+        // Run with `VICTORY_TEXTURE_FROM_COPY=1` (by the test below): the
+        // texels came from the buffer's host copy, not an upload of its own.
+        if std::env::var_os("VICTORY_TEXTURE_FROM_COPY").is_some_and(|v| v == "1") {
+            assert!(crate::list::TEXTURES_FROM_COPIES.load(std::sync::atomic::Ordering::Relaxed) > 0, "copied from the host copy");
+        }
+    }
+
+    /// [`buffer_data_reaches_the_host_texture`] with the texture filled from
+    /// the source buffer's host copy (`VICTORY_TEXTURE_FROM_COPY=1`, read
+    /// once per process: in a child process).
+    #[cfg(windows)]
+    #[test]
+    fn buffer_data_reaches_the_host_texture_from_the_buffers_host_copy() {
+        if crate::host::host().is_none() || std::env::var_os("VICTORY_TEXTURE_FROM_COPY").is_some() {
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .args(["--exact", "resource::tests::buffer_data_reaches_the_host_texture", "--test-threads", "1"])
+            .env("VICTORY_TEXTURE_FROM_COPY", "1")
+            .output()
+            .expect("the child ran");
+        let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && text.contains("1 passed"), "{text}");
     }
 
     /// A 16-bit depth texture the title also asks unordered access for gets
