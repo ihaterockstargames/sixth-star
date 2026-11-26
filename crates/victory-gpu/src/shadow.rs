@@ -2317,6 +2317,32 @@ impl Shadow {
         written
     }
 
+    /// Before merging what the card wrote into offsets `[from, to)`: the
+    /// title's writes so far there, from the write watch, for
+    /// [`Shadow::back_noted`] (`None`: not write-watched memory, or noting
+    /// is off).
+    pub(crate) fn back_ask(&self, from: usize, to: usize) -> Option<Vec<(usize, u64)>> {
+        if !back_note() || from >= to {
+            return None;
+        }
+        let start = self.start as usize;
+        crate::watch::writes(start + from, start + to, false).map(|(_, before)| before)
+    }
+
+    /// After merging what the card wrote: `pieces` (offsets) whose merge
+    /// wrote title memory hold the title's bytes in the copy now, and are
+    /// noted as [`Shadow::noted`] says, from `before` ([`Shadow::back_ask`]).
+    pub(crate) fn back_noted(&self, pieces: &[(usize, usize)], before: &[(usize, u64)]) {
+        let start = self.start as usize;
+        let (Some(lo), Some(hi)) = (pieces.iter().map(|p| p.0).min(), pieces.iter().map(|p| p.1).max()) else {
+            return;
+        };
+        if let Some((now, _)) = crate::watch::writes(start + lo, start + hi, false) {
+            let spans: Vec<(usize, usize)> = pieces.iter().map(|&(a, b)| (start + a, start + b)).collect();
+            self.noted(&spans, before, now);
+        }
+    }
+
     /// After a copy-back: the watch's pages (64 KiB) that lie whole in
     /// `spans` (title addresses whose bytes the copy and title memory now
     /// share) are current at asking `now`, if the copy held them as current

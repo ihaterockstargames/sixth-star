@@ -4172,12 +4172,36 @@ impl Host {
                     *written += count.load(Ordering::Relaxed);
                 }
             } else {
+                // The title's writes so far where pieces are merged, per copy,
+                // so that the pages merged whole are noted current for it
+                // after (`Shadow::back_noted`): else the next refresh copies
+                // the merge back into the copy it came from.
+                let asked: Vec<Option<Vec<(usize, u64)>>> = (0..plan.ranges.len())
+                    .map(|i| {
+                        let mine = pieces.iter().filter(|p| p.0 == i);
+                        let lo = mine.clone().map(|p| p.1).min()?;
+                        let hi = mine.map(|p| p.2).max()?;
+                        plan.ranges[i].shadow.back_ask(lo, hi)
+                    })
+                    .collect();
+                let mut merged: Vec<Vec<(usize, usize)>> = vec![Vec::new(); plan.ranges.len()];
                 let mut title = Vec::new();
                 for &(i, lo, hi, at) in &pieces {
                     // SAFETY: the mapping of the fetched bytes, `total` of
                     // them; the copy into it has run.
                     let gpu = unsafe { std::slice::from_raw_parts((*data + at as usize) as *const u8, hi - lo) };
-                    written[i] += plan.ranges[i].shadow.card_merge(lo, gpu, &mut title);
+                    let n = plan.ranges[i].shadow.card_merge(lo, gpu, &mut title);
+                    if n > 0 {
+                        merged[i].push((lo, hi));
+                    }
+                    written[i] += n;
+                }
+                for (i, before) in asked.iter().enumerate() {
+                    if let Some(before) = before
+                        && !merged[i].is_empty()
+                    {
+                        plan.ranges[i].shadow.back_noted(&merged[i], before);
+                    }
                 }
             }
         }
