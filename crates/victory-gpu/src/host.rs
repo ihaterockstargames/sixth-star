@@ -38,7 +38,7 @@ const RTV_RING: u32 = 1024;
 
 pub(crate) struct Host {
     pub(crate) device: ID3D12Device,
-    queue: ID3D12CommandQueue,
+    pub(crate) queue: ID3D12CommandQueue,
     /// Dedicated DMA copy queue (`D3D12_COMMAND_LIST_TYPE_COPY`) for
     /// [`Host::relay_card_back`], so readbacks of completed flights do not
     /// queue behind in-flight graphics work on `queue` (`VICTORY_RELAY_COPY_QUEUE=0`
@@ -329,6 +329,51 @@ pub(crate) fn removal_context() -> String {
         let _ = write!(text, "\n  {:.1} ms before, thread {thread}: {what}", ms(*at));
     }
     text
+}
+
+/// Where submissions stand, for the freeze watchdog: what the submitting
+/// thread does and for how long, submissions started and finished, our
+/// fence's value against the last signalled, and the newest things done.
+/// Reads only, and takes no lock it would wait for.
+pub(crate) fn submission_report() -> String {
+    let now = now_us();
+    let phase = match SUBMITTING[0].load(Ordering::Relaxed) {
+        0 => "between submissions",
+        1 => "preparing a submission",
+        2 => "waiting for the GPU to run a submission",
+        _ => "copying back what a submission wrote",
+    };
+    let mut text = format!(
+        "the submitting thread is {phase} of {} lists, for {:.1} s; submissions started {}, finished {}",
+        SUBMITTING[1].load(Ordering::Relaxed),
+        now.saturating_sub(SUBMITTING[2].load(Ordering::Relaxed)) as f64 / 1e6,
+        STARTED.load(Ordering::Relaxed),
+        FINISHED.load(Ordering::Relaxed),
+    );
+    if let Some(h) = host() {
+        // SAFETY: a plain query; it does not wait.
+        let reached = unsafe { h.fence.GetCompletedValue() };
+        let signalled = h.submitted.try_lock().map(|s| s.to_string()).unwrap_or_else(|_| "(busy)".into());
+        text.push_str(&format!("; our fence at {reached}, last signalled {signalled}"));
+    }
+    match TRAIL.try_lock() {
+        Ok(trail) => {
+            for (at, thread, what) in trail.iter().rev().take(6) {
+                text.push_str(&format!(
+                    "; {:.1} s before, thread {thread}: {what}",
+                    now.saturating_sub(*at) as f64 / 1e6
+                ));
+            }
+        }
+        Err(_) => text.push_str("; the trail (busy)"),
+    }
+    text
+}
+
+/// For the watchdog's test: holds the locks its report reads.
+#[cfg(test)]
+pub(crate) fn hold_report_locks_for_test() -> std::sync::MutexGuard<'static, std::collections::VecDeque<(u64, u32, String)>> {
+    TRAIL.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Says [`removal_context`] in the log, once: called by whoever finds the
@@ -1008,6 +1053,10 @@ pub(crate) struct HostList {
     indirect_args: Mutex<Option<(ID3D12Resource, u64)>>,
     /// Counts the list in [`ALIVE`] while it lives.
     _alive: Counted,
+    /// GPU timestamps of the list's passes (`crate::gpuprof`), and of its
+    /// prelude.
+    pub(crate) gpu_stamps: Mutex<crate::gpuprof::Stamps>,
+    prelude_stamps: Mutex<crate::gpuprof::Stamps>,
     /// The texts of the markers `note_op` set, in order (for device-removed
     /// data without marker texts), with the host GPU range a copy reads.
     #[cfg(feature = "diagnostics")]
@@ -1020,6 +1069,10 @@ pub(crate) struct HostList {
 
 /// A list's prelude: an allocator and a closed list.
 type Prelude = (ID3D12CommandAllocator, ID3D12GraphicsCommandList);
+
+/// GPU timestamps of the submission's compare of copies in the card's
+/// memory (one submission is prepared at a time).
+static CHECK_STAMPS: Mutex<crate::gpuprof::Stamps> = Mutex::new(crate::gpuprof::Stamps::EMPTY);
 
 /// Whether a host list's prelude is made when the list first needs one. A
 /// prelude runs the texture transitions and twin copies a list needs before
@@ -3253,6 +3306,8 @@ impl Host {
             if !lazy_prelude() {
                 let _ = prelude.set(self.make_prelude());
             }
+            let mut gpu_stamps = crate::gpuprof::Stamps::default();
+            gpu_stamps.begin(&self.device, &list, crate::gpuprof::Kind::Setup);
             Ok(HostList {
                 allocator,
                 list,
@@ -3266,6 +3321,8 @@ impl Host {
                 budget: OnceLock::new(),
                 indirect_args: Mutex::default(),
                 _alive: Counted::new(),
+                gpu_stamps: Mutex::new(gpu_stamps),
+                prelude_stamps: Mutex::default(),
                 #[cfg(feature = "diagnostics")]
                 notes: Mutex::default(),
                 #[cfg(feature = "diagnostics")]
@@ -3572,6 +3629,8 @@ impl Host {
                 (|| -> windows::core::Result<ID3D12CommandList> {
                     allocator.Reset()?;
                     list.Reset(allocator, None)?;
+                    let mut stamps = CHECK_STAMPS.lock().unwrap_or_else(|e| e.into_inner());
+                    stamps.begin(&self.device, list, crate::gpuprof::Kind::CardCheck);
                     // What the submission's shaders wrote, first.
                     list.ResourceBarrier(&[D3D12_RESOURCE_BARRIER {
                         Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
@@ -3602,6 +3661,7 @@ impl Host {
                         );
                         CARD_PASSES[2].fetch_add(1, Ordering::Relaxed);
                     }
+                    stamps.end(list);
                     list.Close()?;
                     list.cast()
                 })()
@@ -4424,10 +4484,14 @@ impl Host {
             self.settle(&mut submitted, WHY_STALE);
             settled += settling.elapsed();
         }
+        // Which runs have a prelude in this submission (for their stamps).
+        let mut preluded = Vec::with_capacity(runs.len());
         for list in runs {
             list.run_deferred(&mut batch);
             firsts.push(lists.len());
-            if let Some(prelude) = list.prelude() {
+            let prelude = list.prelude();
+            preluded.push(prelude.is_some());
+            if let Some(prelude) = prelude {
                 lists.push(Some(prelude));
             }
             lists.push(list.list.cast().ok());
@@ -4454,6 +4518,7 @@ impl Host {
             settled += settling.elapsed();
         }
         let card = self.card_before(runs, flown);
+        let checked = card.as_ref().is_some_and(|c| c.check.is_some());
         if let Some(check) = card.as_ref().and_then(|c| c.check.clone()) {
             lists.push(Some(check));
         }
@@ -4549,6 +4614,22 @@ impl Host {
         FINISHED.store(this_submission, Ordering::Release);
         bury(this_submission);
         let gpu = prepared.elapsed();
+        // What the GPU itself spent on them, from the lists' own stamps, read
+        // now that the fence was reached (no wait of its own).
+        if crate::gpuprof::on() {
+            let mut measured = Vec::with_capacity(2 * runs.len() + 1);
+            for (list, &preluded) in runs.iter().zip(&preluded) {
+                if preluded {
+                    measured.push(list.prelude_stamps.lock().unwrap_or_else(|e| e.into_inner()).read());
+                }
+                measured.push(list.gpu_stamps.lock().unwrap_or_else(|e| e.into_inner()).read());
+            }
+            if checked {
+                measured.push(CHECK_STAMPS.lock().unwrap_or_else(|e| e.into_inner()).read());
+            }
+            crate::gpuprof::set_frequency(&self.queue);
+            crate::gpuprof::submission_done(measured, gpu);
+        }
         SUBMISSION_US[0].fetch_add((prepared - started).as_micros() as u64, Ordering::Relaxed);
         SUBMISSION_US[1].fetch_add(gpu.as_micros() as u64, Ordering::Relaxed);
         #[cfg(feature = "diagnostics")]
@@ -4883,6 +4964,12 @@ impl HostList {
         times
     }
 
+    /// Work of `kind` starts here on the GPU timeline (`crate::gpuprof`);
+    /// `new_pass` for a change of render targets.
+    pub(crate) fn gpu_mark(&self, kind: crate::gpuprof::Kind, new_pass: bool) {
+        self.gpu_stamps.lock().unwrap_or_else(|e| e.into_inner()).mark(&self.list, kind, new_pass);
+    }
+
     pub(crate) fn close(&self) {
         self.twins_to_depth();
         #[cfg(feature = "diagnostics")]
@@ -4908,6 +4995,7 @@ impl HostList {
             // SAFETY: an open list and buffers the list holds.
             unsafe { self.list.ResourceBarrier(&back) };
         }
+        self.gpu_stamps.lock().unwrap_or_else(|e| e.into_inner()).end(&self.list);
         // SAFETY: our list.
         if let Err(e) = unsafe { self.list.Close() } {
             fail(format_args!(
@@ -4946,6 +5034,12 @@ impl HostList {
         };
         if let Err(e) = reset {
             fail(format_args!("a host command list did not reset ({e})"));
+        }
+        if let Some(h) = host() {
+            self.gpu_stamps
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .begin(&h.device, &self.list, crate::gpuprof::Kind::Setup);
         }
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::ResetNs, started.elapsed().as_nanos() as u64);
@@ -5279,6 +5373,10 @@ impl HostList {
         let recorded = unsafe {
             allocator.Reset().and_then(|()| {
                 list.Reset(allocator, None)?;
+                let mut stamps = self.prelude_stamps.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(h) = host() {
+                    stamps.begin(&h.device, list, crate::gpuprof::Kind::Prelude);
+                }
                 if !to_copy.is_empty() {
                     list.ResourceBarrier(&to_copy);
                 }
@@ -5288,6 +5386,7 @@ impl HostList {
                 if !barriers.is_empty() {
                     list.ResourceBarrier(&barriers);
                 }
+                stamps.end(list);
                 list.Close()
             })
         };
@@ -6574,6 +6673,7 @@ impl Meter {
 
     /// Counts a presented frame.
     fn frame(&mut self, hwnd: HWND) {
+        crate::watchdog::presented();
         #[cfg(feature = "diagnostics")]
         tracing::debug!(target: "victory_gpu::frame", token = crate::frame::current(), "present");
         #[cfg(feature = "diagnostics")]
@@ -6613,6 +6713,12 @@ impl Meter {
         );
         late_line(frames);
         card_clock_line(frames, ms);
+        if let Some(line) = crate::gpuprof::line(frames) {
+            tracing::info!("{line}");
+        }
+        if let Some(line) = crate::draw::drop_line(frames) {
+            tracing::warn!("{line}");
+        }
         crate::shadow::back_line(frames);
         {
             let [passes, pieces, compares] = [0, 1, 2].map(|i| CARD_PASSES[i].swap(0, Ordering::Relaxed) as f64 / frames);

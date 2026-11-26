@@ -107,7 +107,36 @@ extern "system" fn set_event_on_completion(this: This, value: u64, event: *mut c
         return E_NOTIMPL;
     }
     waiters.push((value, event as usize));
+    if let Ok(mut w) = WAITS.lock() {
+        w.push((this as usize, value, fence.value.load(Ordering::Acquire), now_ms()));
+    }
     S_OK
+}
+
+/// Events the title asked to be set at a fence value not reached yet: the
+/// fence, the value, the value when last seen, and since when (ms), for the
+/// freeze watchdog (`crate::watchdog`). Kept apart from the fences so that
+/// a report never touches a fence that may be gone.
+static WAITS: Mutex<Vec<(usize, u64, u64, u64)>> = Mutex::new(Vec::new());
+
+fn now_ms() -> u64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
+
+/// The title's waits for fence values not reached yet, oldest first, as
+/// text; `None` if the record is busy (never waits for it).
+pub(crate) fn waits_report() -> Option<String> {
+    let w = WAITS.try_lock().ok()?;
+    let now = now_ms();
+    let mut text = format!("{} title waits for fence values", w.len());
+    for (fence, wanted, seen, since) in w.iter().take(8) {
+        text.push_str(&format!(
+            "; fence {fence:#x} wants {wanted}, was at {seen}, for {:.1} s",
+            now.saturating_sub(*since) as f64 / 1000.0
+        ));
+    }
+    Some(text)
 }
 /// Moves the fence to `value` and sets the events that waited for it.
 pub(crate) fn set(this: This, value: u64) {
@@ -121,6 +150,16 @@ pub(crate) fn set(this: This, value: u64) {
         }
         !reached
     });
+    if let Ok(mut w) = WAITS.lock() {
+        let at = this as usize;
+        w.retain_mut(|(f, wanted, seen, _)| {
+            if *f != at {
+                return true;
+            }
+            *seen = value;
+            *wanted > value
+        });
+    }
 }
 pub(crate) extern "system" fn signal(this: This, value: u64) -> HRESULT {
     set(this, value);

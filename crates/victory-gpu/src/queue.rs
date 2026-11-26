@@ -59,6 +59,37 @@ enum Held {
 #[cfg(windows)]
 static WAITING: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
+/// What waiting queues hold back, as text, for the freeze watchdog; a queue
+/// whose record is busy is named as busy (this never waits for a lock).
+#[cfg(windows)]
+pub(crate) fn held_report() -> String {
+    let Ok(queues) = WAITING.try_lock().map(|q| q.clone()) else {
+        return "queues waiting: (busy)".into();
+    };
+    let mut text = format!("{} queues hold work back", queues.len());
+    for q in queues.iter().take(8) {
+        // SAFETY: a queue on the waiting list is live (one released is
+        // taken off it, under the lock just read).
+        let held = unsafe { &(*(*q as *const Queue)).held };
+        let Ok(held) = held.try_lock() else {
+            text.push_str(&format!("; queue {q:#x} (busy)"));
+            continue;
+        };
+        let first = match held.first() {
+            Some(Held::Wait(fence, value)) => format!(
+                "waits for fence {fence:#x} to reach {value} (it is at {})",
+                crate::fence::completed(*fence as This)
+            ),
+            Some(Held::Value(wait)) => format!("waits for a memory value {wait:?}"),
+            Some(Held::Run(..)) => "a submission next".into(),
+            Some(_) => "a signal next".into(),
+            None => "nothing".into(),
+        };
+        text.push_str(&format!("; queue {q:#x}: {} held, first {first}", held.len()));
+    }
+    text
+}
+
 #[cfg(windows)]
 fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())

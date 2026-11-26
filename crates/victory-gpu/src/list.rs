@@ -872,6 +872,7 @@ extern "system" fn copy_resource(this: This, dst: This, src: This) {
             ensure_state(list, dst, COPY_DEST);
             ensure_state(list, src, COPY_SOURCE);
             crate::texture::host_written(dst);
+            list.gpu_mark(crate::gpuprof::Kind::Copy, false);
             #[cfg(feature = "diagnostics")]
             list.note_op(|| format!("copy resource {src:?} to {dst:?}"));
             // SAFETY: an open list and live textures.
@@ -1007,6 +1008,7 @@ extern "system" fn copy_texture_region(
         let mut to_location = dst;
         to_location.resource = to.as_raw().cast_const().cast();
         let host_box = (!source_box.is_null()).then(|| source_box.cast::<D3D12_BOX>());
+        list.gpu_mark(crate::gpuprof::Kind::Copy, false);
         #[cfg(feature = "diagnostics")]
         {
             let text = || {
@@ -1094,6 +1096,7 @@ fn read_back(
     to.resource = buffer.as_raw().cast_const().cast();
     to.footprint = footprint;
     let host_box = (!source_box.is_null()).then(|| source_box.cast::<D3D12_BOX>());
+    list.gpu_mark(crate::gpuprof::Kind::Copy, false);
     #[cfg(feature = "diagnostics")]
     list.note_op(|| {
         format!(
@@ -1158,6 +1161,7 @@ extern "system" fn resolve(
         ensure_state(list, dst, RESOLVE_DEST);
         ensure_state(list, src, RESOLVE_SOURCE);
         crate::texture::host_written(dst);
+        list.gpu_mark(crate::gpuprof::Kind::Copy, false);
         #[cfg(feature = "diagnostics")]
         list.note_op(|| format!("resolve {src:?} to {dst:?} format {format}"));
         // SAFETY: an open list and live textures; the region is inside both.

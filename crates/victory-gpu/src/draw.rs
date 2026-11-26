@@ -365,6 +365,63 @@ pub(crate) static HEAP_TEXTURES_QUEUE: [AtomicU64; 5] = [const { AtomicU64::new(
 pub(crate) static HEAP_TEXTURES_PARTLY: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 static DROPPED: AtomicU64 = AtomicU64::new(0);
 
+/// Why a draw or dispatch was not run on the host ([`dropped_for`]).
+#[derive(Clone, Copy)]
+pub(crate) enum Why {
+    /// Its pipeline is on the skip list (`VICTORY_SKIP_PIPELINES`): a
+    /// debugging aid that makes the frame do less than the title asked.
+    SkipList = 0,
+    /// A stage of the ray-tracing structure builder, which is off.
+    BuilderOff = 1,
+    /// No host pipeline: not translated, not made, or still being made.
+    NoPipeline = 2,
+    /// A dispatch with a graphics pipeline bound.
+    WrongKind = 3,
+    /// Its resources or root arguments could not be bound.
+    BindFailed = 4,
+    /// A draw that could not be prepared (no pipeline for it, its
+    /// resources, or a primitive kind the host has no way to draw).
+    NotPrepared = 5,
+}
+
+const WHY_NAMES: [&str; 6] = [
+    "on the skip list",
+    "ray-tracing builder off",
+    "no host pipeline",
+    "dispatch with a graphics pipeline",
+    "could not be bound",
+    "draw not prepared",
+];
+
+/// Draws and dispatches not run, by [`Why`], since the last frame line.
+static DROP_WHY: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+
+/// A draw or dispatch was not run on the host, for this reason.
+pub(crate) fn dropped_for(why: Why) {
+    DROPPED.fetch_add(1, Ordering::Relaxed);
+    DROP_WHY[why as usize].fetch_add(1, Ordering::Relaxed);
+}
+
+/// The frame line's account of draws and dispatches not run, per frame by
+/// reason; `None` when every one ran. Work not done is never a speed-up:
+/// a measurement with a count here does less than the title asked.
+pub(crate) fn drop_line(frames: f64) -> Option<String> {
+    let counts: Vec<u64> = DROP_WHY.iter().map(|c| c.swap(0, Ordering::Relaxed)).collect();
+    if counts.iter().all(|&c| c == 0) {
+        return None;
+    }
+    let parts: Vec<String> = counts
+        .iter()
+        .zip(WHY_NAMES)
+        .filter(|(c, _)| **c > 0)
+        .map(|(c, name)| format!("{:.1} {name}", *c as f64 / frames))
+        .collect();
+    Some(format!(
+        "INCOMPLETE FRAMES: draws and dispatches not run per frame: {} (the frame did less than the title asked)",
+        parts.join(", ")
+    ))
+}
+
 /// Marks the last traced draw as not run on the host.
 #[cfg(feature = "diagnostics")]
 fn dropped(pipeline: usize) {
@@ -581,6 +638,8 @@ impl State {
             crate::capture::note_target(record.resource);
             Some(host.dsv(texture, record.depth_desc().as_ref()))
         });
+        // A new set of targets starts a pass of its own on the GPU timeline.
+        list.gpu_mark(crate::gpuprof::Kind::Graphics, true);
         // SAFETY: an open list; the views were just made.
         unsafe {
             list.list.OMSetRenderTargets(
@@ -1778,14 +1837,14 @@ impl State {
         self.window = None;
         #[cfg(windows)]
         if crate::pipeline::is_skipped(self.pipeline as This) {
-            DROPPED.fetch_add(1, Ordering::Relaxed);
+            dropped_for(Why::SkipList);
             #[cfg(feature = "diagnostics")]
             crate::pipeline::note_drop(self.pipeline as This);
             return;
         }
         // The ray-tracing structure builder's stages run all or none.
         if crate::pipeline::is_builder(self.pipeline as This) && !crate::pipeline::builder_runs() {
-            DROPPED.fetch_add(1, Ordering::Relaxed);
+            dropped_for(Why::BuilderOff);
             #[cfg(feature = "diagnostics")]
             {
                 crate::pipeline::note_why("a stage of the ray-tracing structure builder, which is off".to_owned());
@@ -1798,7 +1857,7 @@ impl State {
                 pipeline = format_args!("{:#x}", self.pipeline),
                 "a dispatch without a host pipeline dropped"
             );
-            DROPPED.fetch_add(1, Ordering::Relaxed);
+            dropped_for(Why::NoPipeline);
             #[cfg(feature = "diagnostics")]
             {
                 crate::pipeline::note_drop(self.pipeline as This);
@@ -1808,10 +1867,11 @@ impl State {
         };
         if !p.compute {
             once!("a dispatch with a graphics pipeline");
+            dropped_for(Why::WrongKind);
             return;
         }
         if !self.bind(list, p, true) {
-            DROPPED.fetch_add(1, Ordering::Relaxed);
+            dropped_for(Why::BindFailed);
             // A stage of the structure builder that cannot be bound is a
             // dropped stage: the others stop too.
             if crate::pipeline::is_builder(self.pipeline as This) {
@@ -1819,6 +1879,7 @@ impl State {
             }
             return;
         }
+        list.gpu_mark(crate::gpuprof::Kind::Compute, false);
         #[cfg(feature = "diagnostics")]
         list.note_op(|| self.op_text(format!("dispatch {x}x{y}x{z}"), true));
         match group_base(p) {
@@ -1933,6 +1994,7 @@ impl State {
             && self.prepare_for(list, false, true)
             && match list.list.cast::<ID3D12GraphicsCommandList6>() {
                 Ok(l6) => {
+                    list.gpu_mark(crate::gpuprof::Kind::Graphics, false);
                     #[cfg(feature = "diagnostics")]
                     list.note_op(|| self.op_text(format!("mesh {x}"), false));
                     self.mesh_scissor(list, true);
@@ -1945,7 +2007,7 @@ impl State {
                 Err(_) => false,
             };
         if !ran {
-            DROPPED.fetch_add(1, Ordering::Relaxed);
+            dropped_for(Why::NotPrepared);
             #[cfg(feature = "diagnostics")]
             dropped(self.pipeline);
         }
@@ -2263,6 +2325,7 @@ impl State {
             } else {
                 (vertices, first)
             };
+            list.gpu_mark(crate::gpuprof::Kind::Graphics, false);
             #[cfg(feature = "diagnostics")]
             list.note_op(|| self.op_text(format!("draw {count}x{instances}"), false));
             // SAFETY: an open list with everything set.
@@ -2273,7 +2336,7 @@ impl State {
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
         if !ran {
-            DROPPED.fetch_add(1, Ordering::Relaxed);
+            dropped_for(Why::NotPrepared);
             #[cfg(feature = "diagnostics")]
             dropped(self.pipeline);
         }
@@ -2364,6 +2427,7 @@ impl State {
         }
         let ran = !lost && self.prepare(list, true);
         if ran {
+            list.gpu_mark(crate::gpuprof::Kind::Graphics, false);
             #[cfg(feature = "diagnostics")]
             list.note_op(|| self.op_text(format!("indexed {indices}x{instances}"), false));
             // SAFETY: an open list with everything set.
@@ -2374,7 +2438,7 @@ impl State {
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
         if !ran {
-            DROPPED.fetch_add(1, Ordering::Relaxed);
+            dropped_for(Why::NotPrepared);
             #[cfg(feature = "diagnostics")]
             dropped(self.pipeline);
         }
@@ -2575,6 +2639,7 @@ impl State {
             why("prepare failed");
             return false;
         }
+        list.gpu_mark(if kind == DISPATCH { crate::gpuprof::Kind::Compute } else { crate::gpuprof::Kind::Graphics }, false);
         #[cfg(feature = "diagnostics")]
         list.note_op(|| {
             self.op_text(format!("indirect kind {kind} max {max} at {arguments:#x}"), kind == DISPATCH)
@@ -2863,4 +2928,25 @@ pub(crate) fn stencil_ref(list: &HostList, reference: u32) {
     crate::capture::op(std::ptr::from_ref(list) as usize, || format!("STENCIL REF {reference:#x}"));
     // SAFETY: an open list.
     unsafe { list.list.OMSetStencilRef(reference) };
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+
+    /// Draws not run are named by reason, per frame, and the line is gone
+    /// once every draw runs.
+    #[test]
+    fn dropped_draws_are_counted_by_reason() {
+        for _ in 0..4 {
+            dropped_for(Why::NoPipeline);
+        }
+        dropped_for(Why::SkipList);
+        dropped_for(Why::SkipList);
+        let line = drop_line(2.0).expect("a line while draws are dropped");
+        assert!(line.contains("2.0 no host pipeline"), "{line}");
+        assert!(line.contains("1.0 on the skip list"), "{line}");
+        assert!(line.starts_with("INCOMPLETE FRAMES"), "{line}");
+        assert!(drop_line(1.0).is_none(), "the counts start again after a line");
+    }
 }
