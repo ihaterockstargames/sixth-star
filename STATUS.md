@@ -73,6 +73,12 @@ minutes or more without a crash; that has not been reached or measured.
   in a synthetic frame they make it about 6 times faster (see Notes), but
   they are not measured on the title yet. `ab.bat` runs the defaults and
   them (`best`) one after the other and writes a comparison report.
+- Texture copies from a buffer's host copy (since `78d67bc`, **off by
+  default**): `VICTORY_TEXTURE_FROM_COPY=1` makes a title copy from a buffer
+  into a texture read the buffer's host copy, which is kept up to date page
+  by page, instead of filling a fresh upload buffer from title memory with
+  every byte, every time. Part of `ab.bat`'s `best`. Not measured on the
+  title yet.
 - Copy-back noting (since `bb57383`, default on): pages a copy-back wrote
   whole are no longer copied back into the same copy at the next refresh.
   `VICTORY_BACK_NOTE=0` turns it off.
@@ -174,7 +180,20 @@ Task Manager figures were not taken for this run.
   on this machine. With one submission a frame they gain nothing; with
   eight submissions a frame through the title's queue they took the frame
   from 87 to 61-64 ms (`late_bench`). Card-merge noting (`1f735a8`) brings
-  the best synthetic frame to 16.5 ms.
+  the best synthetic frame to 16.5 ms. In `late_bench`, reading texture
+  copies from the buffers' host copies (`VICTORY_TEXTURE_FROM_COPY=1`) took
+  the frame from 70.6 to 24.7 ms, and to 18.1 ms with the late wait on top.
+- Correctness tests added on 2026-11-26 (synthetic, on this machine, all
+  passing):
+  - differential tests: whatever host copy the GPU reads (the PC's memory,
+    the card, the old copy a descriptor slot still shows), it reads the
+    title's bytes, including copies shaders write and title writes into
+    the ranges they write;
+  - a memory-pressure test: with the card filled to 94% of its budget, a
+    new texture is still made (in the PC's memory) and nothing is refused;
+    after the release the texture comes back to the card and hot copies
+    move;
+  - submissions in flight in all six late-wait and relay modes.
 - Synthetic, on this machine (not the title): 64 reads of a 2048x2048
   texture took 4.4 ms from the card and 41.1 ms from the PC's memory (9.3x);
   the card filled to 90% (6.08 of 6.72 GiB) placed a title-filled texture in
