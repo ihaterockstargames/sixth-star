@@ -16,6 +16,9 @@
 #   best           cardbuf1 and hot1024 together (the synthetic frame_bench:
 #                  140.8 -> 55.7 ms; writable copies on the card when made,
 #                  read-only ones moved by use)
+#   bestrelay      best with VICTORY_RELAY=1 (submissions in flight, copy-back
+#                  on its own thread; passes the flights tests on this machine)
+#   bestlate       best with VICTORY_LATE_WAIT=3
 #   wide           VICTORY_WIDE_REFRESH=1 (refreshes on several threads)
 #   keepsnap       VICTORY_KEEP_SNAPSHOTS=1
 #   noresidency    VICTORY_RESIDENCY=0 (the inherited texture rule)
@@ -60,6 +63,8 @@ function Get-Overrides([string]$name) {
         '^nopromote$' { return [ordered]@{ VICTORY_PROMOTE = '0' } }
         '^cardbuf(\d+)$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = $Matches[1]; VICTORY_CARD_BUFFERS_MB = '1024' } }
         '^best$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024' } }
+        '^bestrelay$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_RELAY = '1' } }
+        '^bestlate$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_LATE_WAIT = '3' } }
         '^wide$' { return [ordered]@{ VICTORY_WIDE_REFRESH = '1' } }
         '^keepsnap$' { return [ordered]@{ VICTORY_KEEP_SNAPSHOTS = '1' } }
         '^relay$' { return [ordered]@{ VICTORY_RELAY = '1' } }
