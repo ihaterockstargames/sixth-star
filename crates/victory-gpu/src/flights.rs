@@ -1160,3 +1160,197 @@ fn what_the_gpu_reads_is_the_titles_bytes_whichever_copy_it_reads() {
     assert!(twinned > 0, "twins were read through");
     assert!(checked > 0);
 }
+
+/// Differential, for copies shaders write: writable title buffers whose
+/// first half the title writes and whose second half a shader writes
+/// whole every frame (declared written), with the title also writing a
+/// word into the second half now and then between frames (after its fence,
+/// as a title may). Copies move to the card when nothing else holds them,
+/// and pages a copy-back wrote whole are noted current. Every frame a pass
+/// reads words all over each buffer before the shader writes it: each must
+/// be what title memory held when the frame was submitted, the title's
+/// words in the second half included (a page noted current wrongly would
+/// hide them). After the frame the second half must hold the shader's
+/// words in title memory.
+#[test]
+fn writes_back_and_title_writes_both_reach_whichever_copy_is_read() {
+    use windows::Win32::Graphics::Direct3D12::*;
+    let Some(host) = crate::host::host() else {
+        return; // no host GPU here
+    };
+    const LEN: usize = 512 << 10;
+    const HALF: usize = LEN / 2;
+    const BUFFERS: usize = 8;
+    const READS: u32 = 64;
+    const FRAMES: u64 = 30;
+    // SAFETY: object creation on the host's device.
+    let (root, read_pass, write_pass) = unsafe {
+        let device: &ID3D12Device = &host.device;
+        let read = "cbuffer c : register(b0) { uint seed; uint words; uint out_at; }; ByteAddressBuffer t : register(t0); RWByteAddressBuffer o : register(u0);
+             [numthreads(64, 1, 1)] void main(uint3 id : SV_DispatchThreadID) {
+                 uint at = ((id.x * 2654435761u + seed) % words) * 4;
+                 o.Store(out_at + id.x * 4, t.Load(at));
+             }";
+        let write = "cbuffer c : register(b0) { uint seed; uint words; uint out_at; }; ByteAddressBuffer t : register(t0); RWByteAddressBuffer o : register(u0);
+             [numthreads(256, 1, 1)] void main(uint3 id : SV_DispatchThreadID) {
+                 if (id.x < words) { o.Store(id.x * 4, (id.x + 1) * (seed + 1)); }
+             }";
+        let params = [
+            D3D12_ROOT_PARAMETER {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+                Anonymous: D3D12_ROOT_PARAMETER_0 {
+                    Constants: D3D12_ROOT_CONSTANTS { ShaderRegister: 0, RegisterSpace: 0, Num32BitValues: 3 },
+                },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            },
+            D3D12_ROOT_PARAMETER {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_SRV,
+                Anonymous: D3D12_ROOT_PARAMETER_0 { Descriptor: D3D12_ROOT_DESCRIPTOR { ShaderRegister: 0, RegisterSpace: 0 } },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            },
+            D3D12_ROOT_PARAMETER {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_UAV,
+                Anonymous: D3D12_ROOT_PARAMETER_0 { Descriptor: D3D12_ROOT_DESCRIPTOR { ShaderRegister: 0, RegisterSpace: 0 } },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            },
+        ];
+        let desc = D3D12_ROOT_SIGNATURE_DESC { NumParameters: 3, pParameters: params.as_ptr(), ..Default::default() };
+        let mut blob = None;
+        D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &mut blob, None).expect("root signature");
+        let blob = blob.expect("blob");
+        let root: ID3D12RootSignature = device
+            .CreateRootSignature(0, std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize()))
+            .expect("root");
+        let pass = |src: &str| -> ID3D12PipelineState {
+            let code = crate::host::compile(src, windows::core::s!("main"), windows::core::s!("cs_5_1")).expect("compiled");
+            device
+                .CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                    pRootSignature: std::mem::transmute_copy(&root),
+                    CS: D3D12_SHADER_BYTECODE { pShaderBytecode: code.as_ptr().cast(), BytecodeLength: code.len() },
+                    ..Default::default()
+                })
+                .expect("pipeline")
+        };
+        (root.clone(), pass(read), pass(write))
+    };
+    let out_len = BUFFERS * READS as usize * 4;
+    let total = BUFFERS * LEN + out_len.next_multiple_of(64 << 10);
+    // SAFETY: a fresh write-watched reservation of our own, never freed.
+    let region = unsafe {
+        windows_sys::Win32::System::Memory::VirtualAlloc(
+            std::ptr::null(),
+            total,
+            windows_sys::Win32::System::Memory::MEM_RESERVE | windows_sys::Win32::System::Memory::MEM_COMMIT | 0x20_0000,
+            windows_sys::Win32::System::Memory::PAGE_READWRITE,
+        )
+    } as u64;
+    assert_ne!(region, 0);
+    let buffers: Vec<(This, u64)> = (0..BUFFERS as u64)
+        .map(|i| {
+            let at = region + i * LEN as u64;
+            (crate::resource::tests::title_buffer_at_flags(at, LEN as u64, 4), at)
+        })
+        .collect();
+    let out_at = region + (BUFFERS * LEN) as u64;
+    let _out = crate::resource::tests::title_buffer_at_flags(out_at, out_len as u64, 4);
+    let word = |address: u64| -> u32 {
+        // SAFETY: inside our reservation.
+        unsafe { (address as *const u32).read_unaligned() }
+    };
+    let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    let (mut moved, mut checked) = (0usize, 0usize);
+    let noted_before = crate::shadow::BACK_NOTED.load(std::sync::atomic::Ordering::Relaxed);
+    for f in 0..FRAMES {
+        crate::shadow::test_hot(Some(64), Some(700_000 + f));
+        for b in &buffers {
+            for _ in 0..16 {
+                let at = b.1 + (next() % (HALF as u64 / 4)) * 4;
+                // SAFETY: inside the buffer's own memory.
+                unsafe { (at as *mut u32).write_unaligned(next() as u32) };
+            }
+            if f % 3 == 1 {
+                // The title writes the shaders' half too, after its fence.
+                let at = b.1 + HALF as u64 + (next() % (HALF as u64 / 4)) * 4;
+                // SAFETY: as above.
+                unsafe { (at as *mut u32).write_unaligned(0xdead_0000 | f as u32) };
+            }
+        }
+        // Title memory as submitted: what the reads must find.
+        let expected: Vec<Vec<u32>> = buffers
+            .iter()
+            // SAFETY: the buffers' own memory, LEN bytes each.
+            .map(|b| unsafe { std::slice::from_raw_parts(b.1 as *const u32, LEN / 4) }.to_vec())
+            .collect();
+        let list = host.new_list().expect("a host list");
+        let out_copy = crate::shadow::find(out_at, out_len as u64).expect("the output's copy");
+        out_copy.refresh(&list, out_at, out_len as u64);
+        list.buffer_state(&out_copy.buffer, crate::host::BUFFER_WRITE);
+        out_copy.gpu_writes(&list, out_at, out_len as u64);
+        // SAFETY: recording on our own list; what it names lives on.
+        unsafe {
+            list.list.SetComputeRootSignature(&root);
+            list.list.SetPipelineState(&read_pass);
+            list.list.SetComputeRootUnorderedAccessView(2, out_copy.gpu(out_at));
+        }
+        let seed = (f as u32).wrapping_mul(0x85eb_ca6b);
+        let mut copies = Vec::new();
+        for (i, b) in buffers.iter().enumerate() {
+            let copy = crate::shadow::find(b.1, LEN as u64).expect("a copy");
+            if copy.carded() {
+                moved += 1;
+            }
+            copy.refresh(&list, b.1, LEN as u64);
+            list.buffer_state(&copy.buffer, crate::host::BUFFER_READ);
+            // SAFETY: as above.
+            unsafe {
+                list.list.SetComputeRoot32BitConstants(0, 3, [seed ^ i as u32, (LEN / 4) as u32, (i as u32) * READS * 4].as_ptr().cast(), 0);
+                list.list.SetComputeRootShaderResourceView(1, copy.gpu(b.1));
+                list.list.Dispatch(1, 1, 1);
+            }
+            copies.push(copy);
+        }
+        // SAFETY: as above.
+        unsafe { list.list.SetPipelineState(&write_pass) };
+        for (b, copy) in buffers.iter().zip(&copies) {
+            let second = b.1 + HALF as u64;
+            list.buffer_state(&copy.buffer, crate::host::BUFFER_WRITE);
+            copy.gpu_writes(&list, second, HALF as u64);
+            // SAFETY: as above.
+            unsafe {
+                list.list.SetComputeRoot32BitConstants(0, 3, [f as u32, (HALF / 4) as u32, 0].as_ptr().cast(), 0);
+                list.list.SetComputeRootUnorderedAccessView(2, copy.gpu(second));
+                list.list.Dispatch((HALF / 4).div_ceil(256) as u32, 1, 1);
+                list.list.SetComputeRootUnorderedAccessView(2, out_copy.gpu(out_at));
+            }
+        }
+        list.close();
+        host.execute(&[&list]);
+        drop(list);
+        drop(copies);
+        crate::shadow::let_go_idle();
+        for i in 0..BUFFERS {
+            for k in 0..READS {
+                let at = (k.wrapping_mul(2_654_435_761).wrapping_add(seed ^ i as u32) % (LEN as u32 / 4)) as usize;
+                let got = word(out_at + ((i as u64) * u64::from(READS) + u64::from(k)) * 4);
+                assert_eq!(got, expected[i][at], "frame {f}, buffer {i}, read {k} (word {at})");
+                checked += 1;
+            }
+            // The shader's words are in title memory now.
+            for w in [0usize, 1, HALF / 4 / 2, HALF / 4 - 1] {
+                let got = word(buffers[i].1 + (HALF + w * 4) as u64);
+                assert_eq!(got, (w as u32 + 1).wrapping_mul(f as u32 + 1), "frame {f}, buffer {i}: shader word {w} came back");
+            }
+        }
+    }
+    crate::shadow::test_hot(None, None);
+    assert_eq!(crate::descriptor::host::device_removed(), None);
+    assert!(moved > 0, "writable copies moved to the card");
+    assert!(crate::shadow::BACK_NOTED.load(std::sync::atomic::Ordering::Relaxed) > noted_before, "pages were noted");
+    assert!(checked > 0);
+}
