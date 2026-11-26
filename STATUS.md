@@ -1,6 +1,6 @@
 # Sixth Star — test status
 
-Last updated: 2026-11-26
+Last updated: 2026-11-26 (overnight)
 Build: current main
 Binary: sixth-star.exe
 
@@ -116,6 +116,13 @@ Task Manager figures were not taken for this run.
   (without paths). A freeze gets a `watchdog:` line with the seconds since the
   first present. Those lines are the source for session length and stability
   here.
+- From `c4a274f` on, the runner also logs per frame line: GPU time from
+  timestamps in the command lists (the title's passes by kind, our own work,
+  the busy span against the time waited for the fence), CPU time by kind of
+  work and by thread, copy-back and refresh bytes by the console's memory
+  kind, and `INCOMPLETE FRAMES` whenever draws were not run; and once, a
+  `startup:` line at the first present. None of them adds a wait. The next
+  measurement on this page comes from them.
 - The runner's frame line (logged every few seconds) splits each frame into
   time spent preparing submissions on the CPU and time on the GPU. In the
   intro cutscene the CPU side is more than twice the GPU side; see "Where the
