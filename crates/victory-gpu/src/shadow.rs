@@ -475,7 +475,19 @@ fn goes_up(shadow: &Arc<Shadow>, run: u64, writable: bool) -> bool {
         // The map's handle is the one count when nothing else has it.
         alone: Arc::strong_count(shadow) == 1 && crate::host::references(&shadow.buffer) == 1,
     };
-    crate::residency::copy_home(&u, HOT_FRAMES) == sixth_memory::residency::CopyHome::Card
+    let home = crate::residency::copy_home(&u, HOT_FRAMES);
+    // Kept only by the card's room (with `auto` that is the limit, and
+    // under pressure there is none): a hot copy draws use much less may
+    // give its place up, as when the byte budget is full ([`swap_for`]).
+    if home == sixth_memory::residency::CopyHome::Stay
+        && !u.in_place
+        && !u.on_card
+        && run >= HOT_FRAMES
+        && !(u.gpu_writable && !u.alone)
+    {
+        swap_for(shadow);
+    }
+    home == sixth_memory::residency::CopyHome::Card
 }
 
 /// A card side for a hot copy of `size` bytes ([`hot_most`]), if there is
