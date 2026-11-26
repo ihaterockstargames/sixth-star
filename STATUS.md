@@ -171,7 +171,10 @@ Task Manager figures were not taken for this run.
   18.5 ms (8, 6 and 4). Reading 2 GiB of copies from the PC's memory took
   83 ms of GPU time, from the card 8 ms. The late wait (`VICTORY_LATE_WAIT`)
   and the relay pass new tests with submissions in flight in all six modes
-  on this machine; with one submission a frame they gain nothing here.
+  on this machine. With one submission a frame they gain nothing; with
+  eight submissions a frame through the title's queue they took the frame
+  from 87 to 61-64 ms (`late_bench`). Card-merge noting (`1f735a8`) brings
+  the best synthetic frame to 16.5 ms.
 - Synthetic, on this machine (not the title): 64 reads of a 2048x2048
   texture took 4.4 ms from the card and 41.1 ms from the PC's memory (9.3x);
   the card filled to 90% (6.08 of 6.72 GiB) placed a title-filled texture in
