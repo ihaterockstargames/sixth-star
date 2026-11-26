@@ -2503,6 +2503,25 @@ const WHY_FENCE: usize = 10;
 /// copy, a fill of upload memory, a texture).
 static LATE_STATS: [std::sync::atomic::AtomicU64; 18] = [const { std::sync::atomic::AtomicU64::new(0) }; 18];
 
+/// The debug layer's first errors (`VICTORY_D3D12_DEBUG=1`), as
+/// [`Host::log_messages`] found them.
+static DEBUG_ERRORS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Tests: whether the debug layer's messages reach us (it is on).
+#[cfg(test)]
+pub(crate) fn debug_layer_on() -> bool {
+    host().is_some_and(|h| h.messages.is_some())
+}
+
+/// The debug layer's errors so far, after taking in what it holds now.
+#[cfg(test)]
+pub(crate) fn debug_errors() -> Vec<String> {
+    if let Some(host) = host() {
+        let _ = host.log_messages();
+    }
+    DEBUG_ERRORS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// Tests: submissions sent without a wait and settles, since the start of
 /// the frame-rate line's count.
 #[cfg(test)]
@@ -4895,7 +4914,7 @@ impl Host {
     }
 
     /// Moves the debug layer's messages into our log; returns the first
-    /// error among them.
+    /// error among them (and keeps the first errors for [`debug_errors`]).
     pub(crate) fn log_messages(&self) -> Option<String> {
         let Some(queue) = &self.messages else {
             return None;
@@ -4917,8 +4936,14 @@ impl Host {
                     let text = String::from_utf8_lossy(text);
                     let text = text.trim_end_matches('\0');
                     tracing::warn!(id = m.ID.0, severity = m.Severity.0, "D3D12: {text}");
-                    if m.Severity.0 <= D3D12_MESSAGE_SEVERITY_ERROR.0 && first_error.is_none() {
-                        first_error = Some(text.to_owned());
+                    if m.Severity.0 <= D3D12_MESSAGE_SEVERITY_ERROR.0 {
+                        if first_error.is_none() {
+                            first_error = Some(text.to_owned());
+                        }
+                        let mut kept = DEBUG_ERRORS.lock().unwrap_or_else(|e| e.into_inner());
+                        if kept.len() < 64 {
+                            kept.push(text.to_owned());
+                        }
                     }
                 }
             }

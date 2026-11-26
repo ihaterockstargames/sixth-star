@@ -85,6 +85,23 @@ fn bytes_of(buffer: (This, u64), len: usize) -> &'static [u8] {
     unsafe { std::slice::from_raw_parts(buffer.1 as *const u8, len) }
 }
 
+
+/// In a child, with the debug layer on: what it reported, printed for the
+/// parent (and the run fails on an error when `SIXTH_DEBUG_STRICT` is set).
+fn debug_layer_report() {
+    if std::env::var_os("VICTORY_D3D12_DEBUG").is_none() {
+        return;
+    }
+    let errors = crate::host::debug_errors();
+    println!("DEBUG-LAYER {} errors (layer on: {})", errors.len(), crate::host::debug_layer_on());
+    for e in errors.iter().take(8) {
+        println!("DEBUG-LAYER error: {e}");
+    }
+    if std::env::var_os("SIXTH_DEBUG_STRICT").is_some() {
+        assert!(errors.is_empty(), "the debug layer reported errors");
+    }
+}
+
 /// The scenario, in a child process (`SIXTH_FLIGHTS_CHILD=1`).
 #[test]
 #[ignore = "run by `submissions_in_flight_keep_order_and_lifetime` in a child process"]
@@ -186,6 +203,7 @@ fn flights_child() {
     if late_asked {
         assert!(sent >= CHAIN as u64, "only {sent} submissions sent without a wait");
     }
+    debug_layer_report();
     println!("FLIGHTS-CHILD-OK sent ahead {sent}, settles {settles}, late {}, relay {}", crate::host::late(), crate::host::relay());
 }
 
@@ -827,6 +845,7 @@ fn frame_child() {
             crate::shadow::BACK_NOTED.load(std::sync::atomic::Ordering::Relaxed)
         );
     }
+    debug_layer_report();
     println!(
         "FRAME-ROW {:.1} | {:.1} | {:.1} | {:.1} | {carded} of {}",
         times[times.len() / 2],
@@ -1086,6 +1105,7 @@ fn late_child() {
     if let Some(cpu) = crate::cpuprof::line(COUNTED as f64) {
         println!("LATE-CPU {cpu}");
     }
+    debug_layer_report();
     println!(
         "LATE-ROW {:.1} | {:.1} | {:.1} | {:.1} a frame",
         times[times.len() / 2],
