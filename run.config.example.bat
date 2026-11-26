@@ -27,9 +27,21 @@ set "CONSOLE=series-x"
 rem Only for series-s: the FidelityFX SDK's ...\Kits\FidelityFX\signedbin.
 set "FFX_DIR="
 
-rem Display size reported to the title: 1920x1080 (default), 2560x1440 or
-rem 3840x2160. The title picks its render size from this.
-set "DISPLAY_MODE=1920x1080"
+rem Resolution. OUTPUT_MODE is the window and swap chain size (empty: they
+rem follow the title's image). RENDER_SCALE (0.1 to 2.0, default 1.0) is
+rem what the title renders at, relative to the output: it is told a display
+rem of OUTPUT_MODE x RENDER_SCALE (1920x1080 x RENDER_SCALE without an
+rem output), and the image is scaled to the window.
+rem   1080p native:       OUTPUT_MODE=1920x1080  RENDER_SCALE=1.0
+rem   720p shown at 1080p: OUTPUT_MODE=1920x1080  RENDER_SCALE=0.6667
+rem   1080p shown at 1440p: OUTPUT_MODE=2560x1440  RENDER_SCALE=0.75
+rem   1080p shown at 4K:   OUTPUT_MODE=3840x2160  RENDER_SCALE=0.5
+set "OUTPUT_MODE="
+set "RENDER_SCALE=1.0"
+
+rem Optional: the display mode the title is told, outright (WxH). It wins
+rem over OUTPUT_MODE x RENDER_SCALE; leave it empty to use the scale.
+set "DISPLAY_MODE="
 
 rem Optional: path to bcpack-tables.bin, needed for BCPack textures. Leave
 rem empty to use the copy in crates\victory-formats\src or next to sixth-star.exe.

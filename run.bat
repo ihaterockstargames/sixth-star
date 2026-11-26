@@ -175,12 +175,36 @@ if not exist "%FFX_DIR%\" (
 set "VICTORY_FFX_DIR=%FFX_DIR%"
 :console_ok
 
-if "%DISPLAY_MODE%"=="" set "DISPLAY_MODE=1920x1080"
-echo(%DISPLAY_MODE%| findstr /i /r /c:"^[0-9][0-9]*x[0-9][0-9]*$" >nul || (
-    call :say "WARNING   DISPLAY_MODE must be WxH, not %DISPLAY_MODE%; using 1920x1080"
-    set "DISPLAY_MODE=1920x1080"
+rem Resolution: OUTPUT_MODE is the window and swap chain (empty: they follow
+rem the title's image), RENDER_SCALE what the title renders at relative to
+rem it, DISPLAY_MODE (if set) the mode the title is told, outright.
+if defined DISPLAY_MODE echo(%DISPLAY_MODE%| findstr /i /r /c:"^[0-9][0-9]*x[0-9][0-9]*$" >nul || (
+    call :say "WARNING   DISPLAY_MODE must be WxH or empty, not %DISPLAY_MODE%; left empty"
+    set "DISPLAY_MODE="
 )
-set "VICTORY_DISPLAY_MODE=%DISPLAY_MODE%"
+if defined OUTPUT_MODE echo(%OUTPUT_MODE%| findstr /i /r /c:"^[0-9][0-9]*x[0-9][0-9]*$" >nul || (
+    call :say "WARNING   OUTPUT_MODE must be WxH or empty, not %OUTPUT_MODE%; left empty"
+    set "OUTPUT_MODE="
+)
+if "%RENDER_SCALE%"=="" set "RENDER_SCALE=1.0"
+echo(%RENDER_SCALE%| findstr /r /c:"^[0-9]*\.*[0-9][0-9]*$" >nul || (
+    call :say "WARNING   RENDER_SCALE must be a number from 0.1 to 2.0, not %RENDER_SCALE%; using 1.0"
+    set "RENDER_SCALE=1.0"
+)
+set "VICTORY_DISPLAY_MODE="
+if defined DISPLAY_MODE set "VICTORY_DISPLAY_MODE=%DISPLAY_MODE%"
+set "VICTORY_OUTPUT_MODE="
+if defined OUTPUT_MODE set "VICTORY_OUTPUT_MODE=%OUTPUT_MODE%"
+set "VICTORY_RENDER_SCALE=%RENDER_SCALE%"
+rem What the title is told, as crates\victory-gpu\src\resolution.rs computes
+rem it (shown by doctor; the runner logs the exact value at start).
+set "SHOW_DISPLAY=%DISPLAY_MODE%"
+if not defined SHOW_DISPLAY if exist "%REPO%\scripts\display.ps1" powershell -NoProfile -ExecutionPolicy Bypass -File "%REPO%\scripts\display.ps1" "%OUTPUT_MODE%" "%RENDER_SCALE%" > "%TEMP%\sixth-star-display.txt" 2>nul
+if not defined SHOW_DISPLAY if exist "%TEMP%\sixth-star-display.txt" set /p SHOW_DISPLAY=<"%TEMP%\sixth-star-display.txt"
+if exist "%TEMP%\sixth-star-display.txt" del "%TEMP%\sixth-star-display.txt" 2>nul
+if not defined SHOW_DISPLAY set "SHOW_DISPLAY=1920x1080 x %RENDER_SCALE%"
+set "SHOW_OUTPUT=%OUTPUT_MODE%"
+if not defined SHOW_OUTPUT set "SHOW_OUTPUT=follows the title's image"
 if defined BCPACK_TABLES call :abspath BCPACK_TABLES "%BCPACK_TABLES%" "%CONFIG_DIR%"
 if defined BCPACK_TABLES (
     if exist "%BCPACK_TABLES%" (
@@ -238,7 +262,11 @@ if not exist "%SHOW_DATA%\" (
 call :say "cache     %SHOW_CACHE%"
 call :say "data      %SHOW_DATA%"
 call :say "console   %CONSOLE%, preset %PRESET%, shader_opt %SHADER_OPT%, dred %DRED%"
-call :say "display   %DISPLAY_MODE%"
+call :say "display   %SHOW_DISPLAY%"
+call :say "output    %SHOW_OUTPUT%"
+call :say "scale     %RENDER_SCALE%"
+if defined DISPLAY_MODE if not "%RENDER_SCALE%"=="1.0" if not "%RENDER_SCALE%"=="1" call :say "WARNING   DISPLAY_MODE is set, so RENDER_SCALE %RENDER_SCALE% is ignored (empty DISPLAY_MODE to use the scale)"
+if not defined OUTPUT_MODE if not "%RENDER_SCALE%"=="1.0" if not "%RENDER_SCALE%"=="1" call :say "WARNING   RENDER_SCALE without OUTPUT_MODE: the window follows the smaller image (set OUTPUT_MODE to scale it up)"
 call :say "dstorage  console HLE (CPU zlib/BCPack)"
 set "SHOW_BCPACK="
 if defined VICTORY_BCPACK_TABLES set "SHOW_BCPACK=%VICTORY_BCPACK_TABLES%"

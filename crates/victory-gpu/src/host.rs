@@ -6675,6 +6675,9 @@ struct Presenter {
     ahead: Vec<(HostList, u64)>,
     hwnd: HWND,
     meter: Meter,
+    /// The last frame's image size, output size and path (logged when it
+    /// changes).
+    shown: Option<((u32, u32), (u32, u32), crate::resolution::PresentPath)>,
 }
 
 /// The frame rate, shown in the window's caption every second and logged
@@ -6995,16 +6998,22 @@ impl Host {
             && first.texels(desc.Width as u32, desc.Height) == whole
             && first.fractions() == [0.0, 0.0, 1.0, 1.0]
             && swap_format(desc.Format).is_some();
-        let (format, width, height) = if copied {
-            (swap_format(desc.Format)?, desc.Width as u32, desc.Height)
+        let (format, source) = if copied {
+            (swap_format(desc.Format)?, (desc.Width as u32, desc.Height))
         } else {
             let Some(format) = descs.iter().find_map(|d| swap_format(d.Format)) else {
                 tracing::warn!(format = desc.Format.0, "cannot present this format");
                 return None;
             };
             let width = descs.iter().map(|d| d.Width as u32).max()?;
-            (format, width, descs.iter().map(|d| d.Height).max()?)
+            (format, (width, descs.iter().map(|d| d.Height).max()?))
         };
+        // The window and swap chain: the output size if one is set
+        // (`VICTORY_OUTPUT_MODE`), else the image's, as before. A copy only
+        // where the two agree; otherwise the layers are drawn, scaled by the
+        // viewport and the linear sampler.
+        let (path, (width, height)) = crate::resolution::present_path(copied, source, crate::resolution::get().output);
+        let copied = path == crate::resolution::PresentPath::Copy;
         let mut presenter = self.presenter.lock().unwrap_or_else(|e| e.into_inner());
         if presenter.is_none() {
             *presenter = match self.presenter(width, height, format) {
@@ -7016,6 +7025,16 @@ impl Host {
             };
         }
         let p = presenter.as_mut()?;
+        let shown = (source, (width, height), path);
+        if p.shown != Some(shown) {
+            p.shown = Some(shown);
+            tracing::info!(
+                "present: source={}x{} output={width}x{height} {}",
+                source.0,
+                source.1,
+                path.name()
+            );
+        }
         if (p.width, p.height, p.format) != (width, height, format) {
             // Presents sent ahead hold back buffers until they have run.
             settle_now(WHY_SYNC);
@@ -7125,7 +7144,12 @@ impl Host {
         format: DXGI_FORMAT,
     ) -> windows::core::Result<Presenter> {
         let hwnd = match title_window() {
-            Some(hwnd) => hwnd,
+            Some(hwnd) => {
+                if let Some(output) = crate::resolution::get().output {
+                    fit_window(hwnd, output);
+                }
+                hwnd
+            }
             None => window(width, height)?,
         };
         // SAFETY: plain object creation for our window.
@@ -7159,7 +7183,60 @@ impl Host {
                 ahead: Vec::new(),
                 hwnd,
                 meter: Meter::new(),
+                shown: None,
             })
+        }
+    }
+}
+
+/// The outer size of a window of styles `style` and `ex_style` whose client
+/// area is `(width, height)`.
+fn outer_size(style: WINDOW_STYLE, ex_style: WINDOW_EX_STYLE, (width, height): (u32, u32)) -> (i32, i32) {
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: width as i32,
+        bottom: height as i32,
+    };
+    // SAFETY: fills our rectangle.
+    if unsafe { AdjustWindowRectEx(&mut rect, style, false, ex_style) }.is_err() {
+        return (width as i32, height as i32);
+    }
+    (rect.right - rect.left, rect.bottom - rect.top)
+}
+
+/// Makes the client area of the title's window `output`
+/// (`VICTORY_OUTPUT_MODE`), so the swap chain is not stretched by the
+/// window. Asynchronously: the window belongs to a title thread, which may
+/// not pump messages while we present, and presenting never waits for it.
+/// A borderless popup (the title's fullscreen) is left as it is.
+fn fit_window(hwnd: HWND, output: (u32, u32)) {
+    // SAFETY: plain queries and an asynchronous move of a live window.
+    unsafe {
+        let mut client = RECT::default();
+        if GetClientRect(hwnd, &mut client).is_err() {
+            return;
+        }
+        let now = ((client.right - client.left) as u32, (client.bottom - client.top) as u32);
+        if now == output {
+            return;
+        }
+        let style = WINDOW_STYLE(GetWindowLongW(hwnd, GWL_STYLE) as u32);
+        let ex_style = WINDOW_EX_STYLE(GetWindowLongW(hwnd, GWL_EXSTYLE) as u32);
+        if style.contains(WS_POPUP) && !style.contains(WS_CAPTION) {
+            tracing::warn!(
+                "the title's window is a borderless popup ({}x{}); left at that size, the output {}x{} is scaled into it",
+                now.0,
+                now.1,
+                output.0,
+                output.1
+            );
+            return;
+        }
+        let (w, h) = outer_size(style, ex_style, output);
+        match SetWindowPos(hwnd, None, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS) {
+            Ok(()) => tracing::info!("the title's window resized to a {}x{} client area", output.0, output.1),
+            Err(e) => tracing::warn!(error = %e, "the title's window was not resized"),
         }
     }
 }
@@ -7615,6 +7692,16 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
             SIZE >> 20,
             before.as_secs_f64() / after.as_secs_f64()
         );
+    }
+
+    #[test]
+    fn a_client_area_gets_the_frame_around_it() {
+        use windows::Win32::UI::WindowsAndMessaging::{WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW, WS_POPUP};
+        // A framed window is larger outside than its client area.
+        let (w, h) = super::outer_size(WS_OVERLAPPEDWINDOW, WINDOW_EX_STYLE(0), (1920, 1080));
+        assert!(w > 1920 && h > 1080, "{w}x{h}");
+        // A popup has no frame: the same size.
+        assert_eq!(super::outer_size(WS_POPUP, WINDOW_EX_STYLE(0), (1280, 720)), (1280, 720));
     }
 
     #[test]
