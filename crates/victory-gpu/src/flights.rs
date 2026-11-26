@@ -979,3 +979,184 @@ fn late_child() {
         sent_counted as f64 / COUNTED as f64
     );
 }
+
+/// Differential: whatever copy the GPU reads, it reads the title's bytes.
+/// Read-only title buffers in write-watched memory, the title writing
+/// random words into them every frame, hot copies moving to the card
+/// (twins kept for the ones a "slot" still shows, then let go), and a
+/// compute pass reading words at offsets that change every frame, through
+/// the copy the lookup gives and, for the slot-shown ones, through the
+/// buffer the slot keeps. What it read comes back to title memory through
+/// the production copy-back of a writable title buffer, and every word is
+/// compared with title memory as the title left it.
+#[test]
+fn what_the_gpu_reads_is_the_titles_bytes_whichever_copy_it_reads() {
+    use windows::Win32::Graphics::Direct3D12::*;
+    let Some(host) = crate::host::host() else {
+        return; // no host GPU here
+    };
+    const LEN: usize = 256 << 10;
+    const SOURCES: usize = 24;
+    const SLOTTED: usize = 8;
+    const READS: u32 = 64;
+    const FRAMES: u64 = 32;
+    // SAFETY: object creation on the host's device.
+    let (root, pipeline) = unsafe {
+        let device: &ID3D12Device = &host.device;
+        let shader = "cbuffer c : register(b0) { uint seed; uint words; uint out_at; }; ByteAddressBuffer t : register(t0); RWByteAddressBuffer o : register(u0);
+             [numthreads(64, 1, 1)] void main(uint3 id : SV_DispatchThreadID) {
+                 uint at = ((id.x * 2654435761u + seed) % words) * 4;
+                 o.Store(out_at + id.x * 4, t.Load(at));
+             }";
+        let code = crate::host::compile(shader, windows::core::s!("main"), windows::core::s!("cs_5_1")).expect("compiled");
+        let params = [
+            D3D12_ROOT_PARAMETER {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+                Anonymous: D3D12_ROOT_PARAMETER_0 {
+                    Constants: D3D12_ROOT_CONSTANTS { ShaderRegister: 0, RegisterSpace: 0, Num32BitValues: 3 },
+                },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            },
+            D3D12_ROOT_PARAMETER {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_SRV,
+                Anonymous: D3D12_ROOT_PARAMETER_0 { Descriptor: D3D12_ROOT_DESCRIPTOR { ShaderRegister: 0, RegisterSpace: 0 } },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            },
+            D3D12_ROOT_PARAMETER {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_UAV,
+                Anonymous: D3D12_ROOT_PARAMETER_0 { Descriptor: D3D12_ROOT_DESCRIPTOR { ShaderRegister: 0, RegisterSpace: 0 } },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            },
+        ];
+        let desc = D3D12_ROOT_SIGNATURE_DESC { NumParameters: 3, pParameters: params.as_ptr(), ..Default::default() };
+        let mut blob = None;
+        D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &mut blob, None).expect("root signature");
+        let blob = blob.expect("blob");
+        let root: ID3D12RootSignature = device
+            .CreateRootSignature(0, std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize()))
+            .expect("root");
+        let pipeline: ID3D12PipelineState = device
+            .CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                pRootSignature: std::mem::transmute_copy(&root),
+                CS: D3D12_SHADER_BYTECODE { pShaderBytecode: code.as_ptr().cast(), BytecodeLength: code.len() },
+                ..Default::default()
+            })
+            .expect("pipeline");
+        (root, pipeline)
+    };
+    // Title memory, write-watched: the sources, then the output.
+    let out_len = (SOURCES + SLOTTED) * READS as usize * 4;
+    let total = SOURCES * LEN + out_len.next_multiple_of(64 << 10);
+    // SAFETY: a fresh reservation of our own, never freed (other tests'
+    // copies may outlive this one's).
+    let region = unsafe {
+        windows_sys::Win32::System::Memory::VirtualAlloc(
+            std::ptr::null(),
+            total,
+            windows_sys::Win32::System::Memory::MEM_RESERVE | windows_sys::Win32::System::Memory::MEM_COMMIT | 0x20_0000,
+            windows_sys::Win32::System::Memory::PAGE_READWRITE,
+        )
+    } as u64;
+    assert_ne!(region, 0);
+    let sources: Vec<(This, u64)> = (0..SOURCES as u64)
+        .map(|i| {
+            let at = region + i * LEN as u64;
+            (crate::resource::tests::title_buffer_at(at, LEN as u64), at)
+        })
+        .collect();
+    let out_at = region + (SOURCES * LEN) as u64;
+    let _out = crate::resource::tests::title_buffer_at_flags(out_at, out_len as u64, 4);
+    let word = |address: u64| -> u32 {
+        // SAFETY: inside our reservation.
+        unsafe { (address as *const u32).read_unaligned() }
+    };
+    // The slots: the buffer the copy of each of the first SLOTTED sources
+    // had when the slot was made, kept as a slot keeps it.
+    let mut slots: Vec<Option<ID3D12Resource>> = vec![None; SLOTTED];
+    let mut rng = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    let (mut moved, mut twinned, mut checked) = (0usize, 0usize, 0usize);
+    for f in 0..FRAMES {
+        crate::shadow::test_hot(Some(64), Some(600_000 + f));
+        // The title writes random words of every source.
+        for s in &sources {
+            for _ in 0..32 {
+                let at = s.1 + (next() % (LEN as u64 / 4)) * 4;
+                // SAFETY: inside the source's own memory.
+                unsafe { (at as *mut u32).write_unaligned(next() as u32) };
+            }
+        }
+        if f == FRAMES / 2 {
+            // The slots let go: their twins go at the next sweep.
+            slots.iter_mut().for_each(|s| *s = None);
+        }
+        let list = host.new_list().expect("a host list");
+        let out_copy = crate::shadow::find(out_at, out_len as u64).expect("the output's copy");
+        out_copy.refresh(&list, out_at, out_len as u64);
+        list.buffer_state(&out_copy.buffer, crate::host::BUFFER_WRITE);
+        out_copy.gpu_writes(&list, out_at, out_len as u64);
+        // SAFETY: recording on our own list; what it names lives on.
+        unsafe {
+            list.list.SetComputeRootSignature(&root);
+            list.list.SetPipelineState(&pipeline);
+            list.list.SetComputeRootUnorderedAccessView(2, out_copy.gpu(out_at));
+        }
+        let seed = (f as u32).wrapping_mul(0x9e37_79b9);
+        let mut reads: Vec<(u64, usize)> = Vec::new(); // (source address, output slot)
+        for (i, s) in sources.iter().enumerate() {
+            let copy = crate::shadow::find(s.1, LEN as u64).expect("a copy");
+            if i < SLOTTED && f < FRAMES / 2 && slots[i].is_none() {
+                slots[i] = Some(copy.buffer.clone());
+            }
+            copy.refresh(&list, s.1, LEN as u64);
+            list.buffer_state(&copy.buffer, crate::host::BUFFER_READ);
+            let mut through = vec![copy.gpu(s.1)];
+            // Through the slot's buffer too, while it is the replaced copy's.
+            if let Some(slot) = slots.get(i).and_then(Option::as_ref)
+                && copy.replaced(slot)
+            {
+                list.buffer_state(slot, crate::host::BUFFER_READ);
+                // SAFETY: a live buffer; the slot keeps it.
+                through.push(unsafe { slot.GetGPUVirtualAddress() });
+                twinned += 1;
+            }
+            if copy.carded() {
+                moved += 1;
+            }
+            for gpu in through {
+                let slot_at = reads.len();
+                reads.push((s.1, slot_at));
+                // SAFETY: as above.
+                unsafe {
+                    list.list.SetComputeRoot32BitConstants(0, 3, [seed ^ i as u32, (LEN / 4) as u32, (slot_at as u32) * READS * 4].as_ptr().cast(), 0);
+                    list.list.SetComputeRootShaderResourceView(1, gpu);
+                    list.list.Dispatch(1, 1, 1);
+                }
+            }
+        }
+        list.close();
+        host.execute(&[&list]);
+        drop(list);
+        crate::shadow::let_go_idle();
+        // What the GPU read, back in title memory, against title memory.
+        for &(source, slot_at) in &reads {
+            let i = sources.iter().position(|s| s.1 == source).expect("a source");
+            for k in 0..READS {
+                let at = ((u64::from(k).wrapping_mul(2_654_435_761) as u32).wrapping_add(seed ^ i as u32) % (LEN as u32 / 4)) as u64 * 4;
+                let got = word(out_at + ((slot_at as u64) * u64::from(READS) + u64::from(k)) * 4);
+                assert_eq!(got, word(source + at), "frame {f}, source {i}, read {k} through copy {slot_at}");
+                checked += 1;
+            }
+        }
+    }
+    crate::shadow::test_hot(None, None);
+    assert_eq!(crate::descriptor::host::device_removed(), None);
+    assert!(moved > 0, "copies moved to the card");
+    assert!(twinned > 0, "twins were read through");
+    assert!(checked > 0);
+}

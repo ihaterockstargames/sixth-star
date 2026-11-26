@@ -3707,7 +3707,7 @@ pub(crate) fn near(va: u64) -> String {
 
 #[cfg(test)]
 mod hot_window_tests {
-    use super::{HOT_FRAMES, Shadow, TEST_FRAME, TEST_HOT, WINDOW, card_dirty, find_any, host};
+    use super::{HOT_FRAMES, Shadow, TEST_FRAME, TEST_HOT, WINDOW, find_any, host};
 
 
     /// Lets the twins go that nothing but submissions running in other
@@ -3765,9 +3765,10 @@ mod hot_window_tests {
         // SAFETY: inside the CPU side's mapping.
         let held = unsafe { std::slice::from_raw_parts(moved.data.add(256), 4096) };
         assert!(held.iter().all(|&b| b == 7), "the title's bytes");
-        let dirty = card_dirty(0);
-        let ours = dirty.iter().find(|(s, _)| Arc::ptr_eq(s, &moved)).expect("queued for the card");
-        assert_eq!(ours.1, [(256, 256 + 4096)]);
+        // Its own ranges, not `card_dirty`'s: that takes every copy's, and
+        // other tests' copies would lose what they had queued.
+        let ours = moved.card.as_ref().expect("a card side").dirty.lock().unwrap().clone();
+        assert_eq!(super::joined(ours), [(256, 256 + 4096)], "queued for the card");
         // The test holds the old copy, as a list would: kept as the twin
         // until it lets go.
         assert!(moved.twin().is_some_and(|t| Arc::ptr_eq(&t, &first)));
