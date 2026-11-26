@@ -2,7 +2,7 @@
 # configuration, stops each run after a fixed time, reads the runtime's own
 # telemetry from each run's log and writes one comparison report.
 #
-#   ab.bat                                   baseline, hot1024, cardbuf1
+#   ab.bat                                   baseline, best, hot1024, cardbuf1
 #   ab.bat -Configs baseline,hot512,hot2048 -Seconds 420 -SkipSeconds 180
 #   ab.bat -ParseOnly logs\run_20261126_230000.log,logs\run_20261126_231000.log
 #
@@ -13,6 +13,9 @@
 #   cardbuf1       VICTORY_CARD_BUFFERS_MIN_MB=1, VICTORY_CARD_BUFFERS_MB=1024
 #                  (buffer copies from 1 MiB on the card from the start; 4.5x
 #                  less copy-back in the synthetic copyback_bench)
+#   best           cardbuf1 and hot1024 together (the synthetic frame_bench:
+#                  140.8 -> 55.7 ms; writable copies on the card when made,
+#                  read-only ones moved by use)
 #   wide           VICTORY_WIDE_REFRESH=1 (refreshes on several threads)
 #   keepsnap       VICTORY_KEEP_SNAPSHOTS=1
 #   noresidency    VICTORY_RESIDENCY=0 (the inherited texture rule)
@@ -27,7 +30,7 @@
 # Nothing here reads anything but the logs the runs write.
 [CmdletBinding()]
 param(
-    [string[]]$Configs = @('baseline', 'hot1024', 'cardbuf1'),
+    [string[]]$Configs = @('baseline', 'best', 'hot1024', 'cardbuf1'),
     # How long each run lasts, from its start (loading included).
     [int]$Seconds = 360,
     # Frame lines before this many seconds after the first one are not
@@ -56,6 +59,7 @@ function Get-Overrides([string]$name) {
         '^noresidency$' { return [ordered]@{ VICTORY_RESIDENCY = '0' } }
         '^nopromote$' { return [ordered]@{ VICTORY_PROMOTE = '0' } }
         '^cardbuf(\d+)$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = $Matches[1]; VICTORY_CARD_BUFFERS_MB = '1024' } }
+        '^best$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024' } }
         '^wide$' { return [ordered]@{ VICTORY_WIDE_REFRESH = '1' } }
         '^keepsnap$' { return [ordered]@{ VICTORY_KEEP_SNAPSHOTS = '1' } }
         '^relay$' { return [ordered]@{ VICTORY_RELAY = '1' } }
