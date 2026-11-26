@@ -521,7 +521,15 @@ fn moved_up(
     let size = old.len.next_multiple_of(1 << 16);
     let on_card = hot_card_for(if old.window { old.len } else { size }, frame, old.window)?;
     let Some(moved) = make(on_card) else {
-        HOT_BYTES.fetch_sub(if old.window { old.len } else { size }, Ordering::Relaxed);
+        // What `hot_card_for` counted for the card side, which went with
+        // the copy that was not made.
+        let bytes = if old.window { old.len } else { size };
+        HOT_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+        if old.window {
+            WINDOW_CARD_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+        } else {
+            CARD_BYTES[0].fetch_sub(bytes, Ordering::Relaxed);
+        }
         return None;
     };
     moved.hot.store(true, Ordering::Relaxed);
