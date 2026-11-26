@@ -71,6 +71,10 @@ pub(crate) struct Shadow {
     card: Option<Card>,
     /// A window of title memory outside buffers, not a title buffer's copy.
     window: bool,
+    /// The last frame it was asked for, shifted up 8 bits, and how many
+    /// frames in a row up to it (at most 255): a window asked for frame
+    /// after frame is hot ([`hot_window_card_for`]).
+    heat: AtomicU64,
     /// With `crate::inplace`: not a copy at all. `buffer` is placed in a
     /// heap opened on the title memory itself, so shaders read and write
     /// the title's own bytes and nothing is copied either way. The heap,
@@ -282,6 +286,124 @@ fn window_card_for(size: u64) -> Option<ID3D12Resource> {
     if buffer.is_none() {
         WINDOW_CARD_BYTES.fetch_sub(size, Ordering::Relaxed);
     }
+    buffer
+}
+
+/// The most bytes of windows whose copies move to the card's memory once
+/// they are hot (`VICTORY_HOT_WINDOWS_MB`; 0, the default, none: the A/B
+/// switch until a run has measured it, ADR 0003 section 5.2).
+///
+/// [`window_card_most`] decides when a window is made, which is when the
+/// world loads, before anything is known of how often draws read it. Here a
+/// window made in the PC's memory, which every draw that uses it reads over
+/// the bus, is made again with a card side once draws have asked for it in
+/// [`HOT_FRAMES`] frames in a row, while the card has room for it
+/// (`crate::residency::promotable`, which stops short of the textures'
+/// target) and no descriptor slot views it (a slot would go on showing the
+/// copy in the PC's memory, which nothing brings up to date once it has
+/// gone). The new copy is filled from title memory by its first refresh, as
+/// any new copy is; lists recorded with the old one keep it, and bring it
+/// up to date, until they are reset. At most [`HOT_BYTES_PER_FRAME`] move
+/// in a frame.
+///
+/// What it costs: what the title writes in such a window goes up to the
+/// card before each submission (`Host::card_before`), once, where the GPU
+/// read it over the bus as often as draws read it. A window the title
+/// rewrites whole every frame and draws read once gains nothing.
+fn hot_windows_most() -> u64 {
+    #[cfg(test)]
+    if TEST_HOT.with(std::cell::Cell::get) {
+        return 256 << 20;
+    }
+    static MOST: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *MOST.get_or_init(|| {
+        std::env::var("VICTORY_HOT_WINDOWS_MB").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0) << 20
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: hot windows move on this thread whatever the switch says.
+    static TEST_HOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Tests: the frame this thread's asks are in.
+    static TEST_FRAME: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// The frame now, for [`warmed`].
+fn frame_now() -> u64 {
+    #[cfg(test)]
+    if let Some(frame) = TEST_FRAME.with(std::cell::Cell::get) {
+        return frame;
+    }
+    crate::frame::current()
+}
+
+/// Frames in a row a window must be asked for to move to the card.
+const HOT_FRAMES: u64 = 8;
+
+/// The most bytes of windows moved to the card in one frame.
+const HOT_BYTES_PER_FRAME: u64 = 64 << 20;
+
+/// Since the start: windows moved to the card once hot, and their bytes.
+pub(crate) static HOT_WINDOWS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Notes that `shadow` was asked for in `frame` ([`Shadow::heat`]) and
+/// returns how many frames in a row it has been.
+fn warmed(shadow: &Shadow, frame: u64) -> u64 {
+    let heat = shadow.heat.load(Ordering::Relaxed);
+    let (last, run) = (heat >> 8, heat & 0xff);
+    if last == frame && run > 0 {
+        return run;
+    }
+    let run = if run > 0 && last + 1 == frame { (run + 1).min(0xff) } else { 1 };
+    shadow.heat.store(frame << 8 | run, Ordering::Relaxed);
+    run
+}
+
+/// Whether `shadow`, a window asked for `run` frames in a row, is one to
+/// move to the card: a window in the PC's memory that no descriptor slot
+/// views, asked for often enough. Room is [`hot_window_card_for`]'s to
+/// decide.
+fn hot(shadow: &Shadow, run: u64) -> bool {
+    shadow.window
+        && shadow.card.is_none()
+        && shadow.place.is_none()
+        && run >= HOT_FRAMES
+        && crate::host::references(&shadow.buffer) == 1
+}
+
+/// A card side for a hot window of `size` bytes ([`hot_windows_most`]), if
+/// there is room: under the switch's bytes, within what may come to the
+/// card without raising the pressure, and within this frame's share.
+fn hot_window_card_for(size: u64, frame: u64) -> Option<ID3D12Resource> {
+    static FRAME: AtomicU64 = AtomicU64::new(0);
+    static MOVED: AtomicU64 = AtomicU64::new(0);
+    let most = hot_windows_most();
+    if most == 0 || !cards() {
+        return None;
+    }
+    let host = host()?;
+    if !host.card_ready() {
+        return None;
+    }
+    if FRAME.swap(frame, Ordering::Relaxed) != frame {
+        MOVED.store(0, Ordering::Relaxed);
+    }
+    if MOVED.load(Ordering::Relaxed) + size > HOT_BYTES_PER_FRAME || crate::residency::promotable() < size {
+        return None;
+    }
+    if WINDOW_CARD_BYTES.fetch_add(size, Ordering::Relaxed) + size > most + window_card_most() {
+        WINDOW_CARD_BYTES.fetch_sub(size, Ordering::Relaxed);
+        return None;
+    }
+    let buffer = {
+        let _as = crate::ledger::booking_as(crate::ledger::Cat::CardSide);
+        host.uav_buffer(size)
+    };
+    match &buffer {
+        Some(_) => MOVED.fetch_add(size, Ordering::Relaxed),
+        None => WINDOW_CARD_BYTES.fetch_sub(size, Ordering::Relaxed),
+    };
     buffer
 }
 
@@ -1736,6 +1858,7 @@ impl Shadow {
             },
             card: None,
             window: false,
+            heat: AtomicU64::new(0),
             place: None,
         }
     }
@@ -3022,6 +3145,25 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
     };
     if let Some(shadow) = map.get(&(start, len)) {
         note(shadow);
+        if hot_windows_most() > 0 {
+            let frame = frame_now();
+            let run = warmed(shadow, frame);
+            if hot(shadow, run)
+                && let Some(on_card) = hot_window_card_for(len, frame)
+                && let Some(moved) = window_copy(start, len, Some(on_card))
+            {
+                HOT_WINDOWS[0].fetch_add(1, Ordering::Relaxed);
+                HOT_WINDOWS[1].fetch_add(len, Ordering::Relaxed);
+                tracing::debug!(start = format_args!("{start:#x}"), len, run, "a hot window's copy moves to the card");
+                moved.heat.store(shadow.heat.load(Ordering::Relaxed), Ordering::Relaxed);
+                note(&moved);
+                if let Some(old) = map.insert((start, len), moved.clone()) {
+                    // Lists recorded with it hold it; it goes after them.
+                    crate::host::retire(old);
+                }
+                return Some(moved);
+            }
+        }
         return Some(shadow.clone());
     }
     // In place, if asked for and the window's memory can be opened: the
@@ -3032,14 +3174,24 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
         map.insert((start, len), shadow.clone());
         return Some(shadow);
     }
+    let shadow = window_copy(start, len, window_card_for(len))?;
+    note(&shadow);
+    map.insert((start, len), shadow.clone());
+    Some(shadow)
+}
+
+/// A new copy of the window `[start, start + len)` of title memory outside
+/// buffers, in the PC's memory, or with `on_card` as the side shaders see
+/// and the PC's memory as the CPU's side. Filled by its first refresh.
+fn window_copy(start: u64, len: u64, on_card: Option<ID3D12Resource>) -> Option<Arc<Shadow>> {
     let (buffer, data) = {
         let _as = crate::ledger::booking_as(crate::ledger::Cat::WindowCopy);
         host()?.shared_buffer(len)?
     };
     crate::host::name(&buffer, || format!("title memory {start:#x}+{len:#x}"));
-    // With room for windows on the card (`window_card_most`): shaders get a
-    // buffer there, and the one just made is the CPU's side.
-    let (buffer, card) = match window_card_for(len) {
+    // With a card side (`window_card_most`, `hot_window_card_for`): shaders
+    // get that buffer, and the one just made is the CPU's side.
+    let (buffer, card) = match on_card {
         Some(on_card) => {
             crate::host::name(&on_card, || format!("title memory {start:#x}+{len:#x} on the card"));
             let card = Card {
@@ -3067,8 +3219,6 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
     if shadow.card.is_some() {
         CARDED.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&shadow));
     }
-    note(&shadow);
-    map.insert((start, len), shadow.clone());
     Some(shadow)
 }
 
@@ -3208,4 +3358,60 @@ pub(crate) fn near(va: u64) -> String {
         ));
     }
     text
+}
+
+#[cfg(test)]
+mod hot_window_tests {
+    use super::{HOT_FRAMES, TEST_FRAME, TEST_HOT, WINDOW, card_dirty, find_any, host};
+    use std::sync::Arc;
+
+    /// A window draws ask for frame after frame moves to the card once it
+    /// is hot, and stays there; one a descriptor slot views stays in the
+    /// PC's memory, as does one asked for with a frame missed in between.
+    #[test]
+    fn a_window_asked_for_frame_after_frame_moves_to_the_card() {
+        if host().is_none() {
+            return; // no host GPU here
+        }
+        TEST_HOT.with(|h| h.set(true));
+        // Title memory of our own, never freed (windows are found by address).
+        let memory: &'static [u8] = Vec::leak(vec![7u8; 4 * WINDOW as usize]);
+        let at = (memory.as_ptr() as u64).next_multiple_of(WINDOW);
+        let ask = |address: u64, frame: u64| {
+            TEST_FRAME.with(|f| f.set(Some(frame)));
+            find_any(address + 256, 4096).expect("a window")
+        };
+        let first = ask(at, 1000);
+        assert!(!first.carded(), "made in the PC's memory");
+        for frame in 1001..1000 + HOT_FRAMES {
+            assert!(Arc::ptr_eq(&ask(at, frame), &first), "not hot yet at frame {frame}");
+        }
+        let moved = ask(at, 1000 + HOT_FRAMES);
+        assert!(moved.carded(), "hot: on the card");
+        assert_eq!((moved.start, moved.len), (first.start, first.len), "the same window");
+        assert!(Arc::ptr_eq(&ask(at, 1000 + HOT_FRAMES + 1), &moved), "and it stays");
+        // Its first refresh takes title memory into the CPU's side, and what
+        // it took goes up to the card before the next submission.
+        let from = moved.start as usize + 256;
+        assert_eq!(moved.copy(from, from + 4096), 4096);
+        // SAFETY: inside the CPU side's mapping.
+        let held = unsafe { std::slice::from_raw_parts(moved.data.add(256), 4096) };
+        assert!(held.iter().all(|&b| b == 7), "the title's bytes");
+        let dirty = card_dirty(0);
+        let ours = dirty.iter().find(|(s, _)| Arc::ptr_eq(s, &moved)).expect("queued for the card");
+        assert_eq!(ours.1, [(256, 256 + 4096)]);
+        // A slot views the next window: it stays where it is.
+        let viewed = ask(at + WINDOW, 2000);
+        let _slot = viewed.buffer.clone();
+        for frame in 2001..2000 + 2 * HOT_FRAMES {
+            assert!(!ask(at + WINDOW, frame).carded(), "viewed by a slot, frame {frame}");
+        }
+        // Asked for with a frame missed: the count starts again.
+        let gappy = ask(at + 2 * WINDOW, 3000);
+        for frame in (3001..3000 + 2 * HOT_FRAMES).filter(|f| f % 4 != 0) {
+            assert!(Arc::ptr_eq(&ask(at + 2 * WINDOW, frame), &gappy), "not in a row, frame {frame}");
+        }
+        TEST_HOT.with(|h| h.set(false));
+        TEST_FRAME.with(|f| f.set(None));
+    }
 }

@@ -181,7 +181,7 @@ pub(crate) fn texture_heap(placement: Placement) -> D3D12_HEAP_PROPERTIES {
 
 /// For the frame line, since the last call.
 pub(crate) fn line() -> Option<String> {
-    static LAST: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+    static LAST: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
     let now = [
         TEXTURES_IN_SYSTEM.load(Relaxed),
         RECLAIMED[0].load(Relaxed),
@@ -189,13 +189,17 @@ pub(crate) fn line() -> Option<String> {
         REFUSED.load(Relaxed),
         PROMOTED[0].load(Relaxed),
         PROMOTED[1].load(Relaxed),
+        SLOTS_REMADE.load(Relaxed),
+        crate::shadow::HOT_WINDOWS[0].load(Relaxed),
+        crate::shadow::HOT_WINDOWS[1].load(Relaxed),
     ];
     let d: Vec<u64> = now.iter().zip(&LAST).map(|(n, l)| n - l.swap(*n, Relaxed)).collect();
     let pressure = with(|r| r.pressure());
     let [alive, _, bytes] = crate::ledger::alive(crate::ledger::Cat::Texture, crate::ledger::Pool::System);
     Some(format!(
         "residency: pressure {pressure:?}; since the last line {} textures made in the PC's memory for lack of room on the card \
-         ({} since the start, {alive} alive, {:.0} MiB), {} idle textures given up ({:.0} MiB), {} back on the card ({:.0} MiB), {} texture passes with no room in either pool",
+         ({} since the start, {alive} alive, {:.0} MiB), {} idle textures given up ({:.0} MiB), {} back on the card ({:.0} MiB, {} slots made again), {} texture passes with no room in either pool; \
+         {} hot windows moved to the card ({:.0} MiB)",
         d[0],
         now[0],
         bytes as f64 / f64::from(1u32 << 20),
@@ -203,7 +207,10 @@ pub(crate) fn line() -> Option<String> {
         d[2] as f64 / f64::from(1u32 << 20),
         d[4],
         d[5] as f64 / f64::from(1u32 << 20),
-        d[3]
+        d[6],
+        d[3],
+        d[7],
+        d[8] as f64 / f64::from(1u32 << 20)
     ))
 }
 
