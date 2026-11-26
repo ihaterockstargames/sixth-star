@@ -5,6 +5,9 @@
 #   ab.bat                                   baseline, best, bestlate, hot1024, cardbuf1
 #   ab.bat -Configs baseline,hot512,hot2048 -Seconds 420 -SkipSeconds 180
 #   ab.bat -ParseOnly logs\run_20261126_230000.log,logs\run_20261126_231000.log
+#   ab.bat -Stability                        one run of 33 minutes (baseline, or the
+#                                            -Configs given): the session length the
+#                                            leaderboard's stability lane asks for
 #
 # Configurations (each one run of the title):
 #   baseline       the defaults
@@ -52,8 +55,15 @@ param(
     # Only read these logs (one per configuration) and write the report.
     [string[]]$ParseOnly = @(),
     # Show what would run, run nothing.
-    [switch]$DryRun
+    [switch]$DryRun,
+    # One long run for the stability record: 33 minutes, so that the
+    # runner's session line passes 30 minutes after the first frame.
+    [switch]$Stability
 )
+if ($Stability) {
+    if (-not $PSBoundParameters.ContainsKey('Configs')) { $Configs = @('baseline') }
+    if (-not $PSBoundParameters.ContainsKey('Seconds')) { $Seconds = 33 * 60 }
+}
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $runBat = Join-Path $repo 'run.bat'
@@ -109,6 +119,7 @@ function Read-Run([string]$log) {
         Gpu = New-Object System.Collections.Generic.List[object]
         Vram = New-Object System.Collections.Generic.List[object]
         Residency = $null; Memory = $null; Session = $null; Startup = $null; Cpu = $null; Exit = $null
+        SessionS = $null; SessionFrames = $null; SessionFps = $null; SessionMs = $null; WorstFps = $null; LongestGap = $null; NotRun = $null
         FirstError = $null
     }
     $first = $null
@@ -140,7 +151,18 @@ function Read-Run([string]$log) {
         }
         if ($line -match '(residency: .*)$') { $r.Residency = $Matches[1] }
         if ($line -match '(host memory alive.*)$') { $r.Memory = $Matches[1] }
-        if ($line -match '(session: .*)$') { $r.Session = $Matches[1] }
+        if ($line -match '(session: .*)$') {
+            $r.Session = $Matches[1]
+            if ($r.Session -match 'session: (\d+) min (\d+) s since the first present, (\d+) frames, ([\d.]+) FPS average \(([\d.]+) ms/frame\), worst second ([\d.]+) FPS, longest time between two presents ([\d.]+) s; (\d+) of (\d+) seconds with draws not run') {
+                $r.SessionS = [int]$Matches[1] * 60 + [int]$Matches[2]
+                $r.SessionFrames = [int64]$Matches[3]
+                $r.SessionFps = [double]$Matches[4]
+                $r.SessionMs = [double]$Matches[5]
+                $r.WorstFps = [double]$Matches[6]
+                $r.LongestGap = [double]$Matches[7]
+                $r.NotRun = "$($Matches[8]) of $($Matches[9])"
+            }
+        }
         if ($line -match '(startup: .*)$') { $r.Startup = $Matches[1] }
         if ($line -match '(CPU time per frame in measured work.*)$') { $r.Cpu = $Matches[1] }
         if ($line -match 'watchdog: ') { $r.Watchdog++ }
@@ -234,7 +256,12 @@ function Write-Report($runs, [string]$path, $info) {
         @('submitting thread busy, %', { param($x) F $x.Run.VramMedian.Submitter '{0:N0}' }),
         @('watchdog lines (stalls)', { param($x) "$($x.Run.Watchdog)" }),
         @('errors / device removed / panics', { param($x) "$($x.Run.Errors) / $($x.Run.Removed) / $($x.Run.Panics)" }),
-        @('ran, s (exit code)', { param($x) "$(F $x.Seconds '{0:N0}') ($(if ($null -ne $x.Run.Exit) { $x.Run.Exit } else { 'n/a' }))" })
+        @('ran, s (exit code)', { param($x) "$(F $x.Seconds '{0:N0}') ($(if ($null -ne $x.Run.Exit) { $x.Run.Exit } else { 'n/a' }))" }),
+        @('how it ended', { param($x) if ($x.Stopped) { 'ran the full time, stopped by the script: no crash' } elseif ($null -eq $x.Stopped) { 'n/a (log read only)' } else { 'ended by itself before the time was up: a crash or an exit' } }),
+        @('session line: length since the first frame', { param($x) if ($null -ne $x.Run.SessionS) { '{0} min {1} s' -f [int][math]::Floor($x.Run.SessionS / 60), ($x.Run.SessionS % 60) } else { 'no session line' } }),
+        @('session line: FPS average (ms/frame)', { param($x) if ($null -ne $x.Run.SessionFps) { '{0:N2} ({1:N1})' -f $x.Run.SessionFps, $x.Run.SessionMs } else { 'n/a' } }),
+        @('session line: worst second, longest freeze', { param($x) if ($null -ne $x.Run.WorstFps) { '{0:N2} FPS, {1:N2} s' -f $x.Run.WorstFps, $x.Run.LongestGap } else { 'n/a' } }),
+        @('session line: seconds with draws not run', { param($x) if ($x.Run.NotRun) { $x.Run.NotRun } else { 'n/a' } })
     )
     foreach ($row in $rows) {
         $cells = $runs | ForEach-Object { (& $row[1] $_) -replace '\|', '/' }
@@ -249,6 +276,21 @@ function Write-Report($runs, [string]$path, $info) {
         foreach ($p in @('Session', 'Startup', 'Residency', 'Memory', 'Cpu', 'FirstError')) {
             if ($x.Run.$p) { $out.Add("- last ${p}: ``$($x.Run.$p)``") }
         }
+    }
+    # What STATUS.md can say, from the session lines only (measured, not
+    # estimated): one line per run that wrote one.
+    $out.Add('')
+    $out.Add('## For STATUS.md (measured by the runner''s session line)')
+    $out.Add('')
+    foreach ($x in $runs) {
+        if ($null -eq $x.Run.SessionS) {
+            $out.Add("- $($x.Name): no session line in the log (the run ended before a minute of frames).")
+            continue
+        }
+        $len = '{0} min {1} s' -f [int][math]::Floor($x.Run.SessionS / 60), ($x.Run.SessionS % 60)
+        $ended = if ($x.Stopped) { 'without a crash (the run was stopped by the A/B script when its time was up)' } elseif ($null -eq $x.Stopped) { '(how the run ended is not known from the log alone)' } else { 'and then the run ended by itself (crash or exit; see the log)' }
+        $settings = if ($x.Overrides.Count) { ($x.Overrides.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ' } else { 'default settings' }
+        $out.Add("- $(Get-Date -Format 'yyyy-MM-dd'), build $($info['commit']), $settings`: a session of at least $len after the first frame $ended; $('{0:N2}' -f $x.Run.SessionFps) FPS average ($('{0:N1}' -f $x.Run.SessionMs) ms/frame) over the session, worst second $('{0:N2}' -f $x.Run.WorstFps) FPS, longest time between two presents $('{0:N2}' -f $x.Run.LongestGap) s, draws not run in $($x.Run.NotRun) seconds. Measured by the maintainer from the runner's session line (logged every minute, so the session ran up to a minute longer).")
     }
     $out.Add('')
     $out.Add('Send this file back as it is. It holds no paths but the logs'' and no game data.')
@@ -278,7 +320,7 @@ if ($ParseOnly.Count) {
     $names = @($Configs | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
     $runs = for ($i = 0; $i -lt $logs.Count; $i++) {
         $name = if ($i -lt $names.Count) { $names[$i] } else { "run$($i + 1)" }
-        [pscustomobject]@{ Name = (Get-Name $name); Overrides = (Get-Overrides $name); Run = (Read-Run (Resolve-Path $logs[$i]).Path); Seconds = $null }
+        [pscustomobject]@{ Name = (Get-Name $name); Overrides = (Get-Overrides $name); Run = (Read-Run (Resolve-Path $logs[$i]).Path); Seconds = $null; Stopped = $null }
     }
     if (-not $OutDir) { $OutDir = Split-Path -Parent (Resolve-Path $logs[0]).Path }
     Write-Report $runs (Join-Path $OutDir 'ab-report.md') (Get-Build)
@@ -341,6 +383,7 @@ try {
             if ($left % 30 -lt 2) { Write-Host "[ab] $name`: $left s left" }
         }
         $ran = ((Get-Date) - $started).TotalSeconds
+        $stopped = -not $p.HasExited
         if (-not $p.HasExited) {
             Write-Host "[ab] $name`: time is up, stopping the run"
             Get-Process sixth-star -ErrorAction SilentlyContinue | Where-Object { $_.StartTime -ge $started } | Stop-Process -Force
@@ -351,7 +394,7 @@ try {
         Start-Sleep -Seconds 3   # let the device and the log close
         $log = Get-ChildItem $dir -Filter '*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
         if (-not $log) { Write-Host "[ab] $name`: no log written"; continue }
-        $runs.Add([pscustomobject]@{ Name = $name; Overrides = $over; Run = (Read-Run $log.FullName); Seconds = $ran })
+        $runs.Add([pscustomobject]@{ Name = $name; Overrides = $over; Run = (Read-Run $log.FullName); Seconds = $ran; Stopped = $stopped })
     }
 } finally {
     Remove-Item $wrapper -ErrorAction SilentlyContinue
