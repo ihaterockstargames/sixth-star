@@ -1552,9 +1552,28 @@ fn pressure_stress() {
             .filter(|b| crate::shadow::find(b.1, LEN as u64).is_some_and(|c| c.carded()))
             .count();
     }
-    crate::shadow::test_hot(None, None);
     println!("hot copies on the card after the release: {moved} of {}", buffers.len());
     assert_eq!(moved, buffers.len());
+    // Filled again: the reclaim puts the hot copies back into the PC's
+    // memory before textures have to go there.
+    let mut filler = Vec::new();
+    while share().0 < 0.93 {
+        let Some(b) = host.uav_buffer(64 << 20) else {
+            break;
+        };
+        filler.push(b);
+        assert!(filler.len() < 400, "the card never filled");
+    }
+    let _ = crate::residency::need();
+    crate::resource::reclaim();
+    let demoted = buffers
+        .iter()
+        .filter(|b| crate::shadow::find(b.1, LEN as u64).is_some_and(|c| !c.carded()))
+        .count();
+    println!("filled again to {:.0}%: hot copies back in the PC's memory: {demoted} of {}", share().0 * 100.0, buffers.len());
+    assert_eq!(demoted, buffers.len());
+    drop(filler);
+    crate::shadow::test_hot(None, None);
     assert_eq!(crate::descriptor::host::device_removed(), None);
 }
 

@@ -193,7 +193,7 @@ pub(crate) fn texture_heap(placement: Placement) -> D3D12_HEAP_PROPERTIES {
 
 /// For the frame line, since the last call.
 pub(crate) fn line() -> Option<String> {
-    static LAST: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
+    static LAST: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
     let now = [
         TEXTURES_IN_SYSTEM.load(Relaxed),
         RECLAIMED[0].load(Relaxed),
@@ -209,6 +209,8 @@ pub(crate) fn line() -> Option<String> {
         crate::shadow::HOT_SLOTS.load(Relaxed),
         crate::shadow::TWINS_GONE.load(Relaxed),
         crate::shadow::TWIN_WRITES.load(Relaxed),
+        crate::shadow::DEMOTED[0].load(Relaxed),
+        crate::shadow::DEMOTED[1].load(Relaxed),
     ];
     let d: Vec<u64> = now.iter().zip(&LAST).map(|(n, l)| n - l.swap(*n, Relaxed)).collect();
     let pressure = with(|r| r.pressure());
@@ -216,7 +218,7 @@ pub(crate) fn line() -> Option<String> {
     Some(format!(
         "residency: pressure {pressure:?}; since the last line {} textures made in the PC's memory for lack of room on the card \
          ({} since the start, {alive} alive, {:.0} MiB), {} idle textures given up ({:.0} MiB), {} back on the card ({:.0} MiB, {} slots made again), {} texture passes with no room in either pool; \
-         hot copies moved to the card: {} windows ({:.0} MiB), {} title buffers ({:.0} MiB), {} slots made again from them,          {} old copies let go, {} shader writes declared for a copy with a twin",
+         hot copies moved to the card: {} windows ({:.0} MiB), {} title buffers ({:.0} MiB), {} slots made again from them,          {} old copies let go, {} shader writes declared for a copy with a twin, {} back to the PC's memory under pressure ({:.0} MiB)",
         d[0],
         now[0],
         bytes as f64 / f64::from(1u32 << 20),
@@ -232,7 +234,9 @@ pub(crate) fn line() -> Option<String> {
         d[10] as f64 / f64::from(1u32 << 20),
         d[11],
         d[12],
-        d[13]
+        d[13],
+        d[14],
+        d[15] as f64 / f64::from(1u32 << 20)
     ))
 }
 

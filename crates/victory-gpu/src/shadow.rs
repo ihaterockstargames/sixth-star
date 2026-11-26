@@ -553,7 +553,118 @@ fn moved_up(
         *moved.twin_old.lock().unwrap_or_else(|e| e.into_inner()) = Some(old.clone());
         TWINNED.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&moved));
     }
+    HOT_COPIES.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&moved));
     Some(moved)
+}
+
+/// The copies [`moved_up`] made, for [`demote`].
+static HOT_COPIES: Mutex<Vec<std::sync::Weak<Shadow>>> = Mutex::new(Vec::new());
+
+/// Since the start: hot copies put back into the PC's memory under
+/// pressure ([`demote`]), and their card bytes.
+pub(crate) static DEMOTED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Under pressure (`crate::resource::reclaim`, after the idle textures):
+/// puts hot copies back into the PC's memory, least recently used first,
+/// until `need` bytes of the card are given up. Textures come first: a
+/// texture in the PC's memory is sampled about nine times slower, and the
+/// hot copies only bought bandwidth. A copy is replaced as [`moved_up`]
+/// replaces one: a read-only one a slot or a list still has keeps the old
+/// as its twin; one shaders may write goes only when nothing else has it;
+/// one that still has a twin of its own is passed over. The new copy starts
+/// cold, so it comes back up only after 8 frames of use and once the card
+/// has room again. `only`: tests, a range of title memory to keep to.
+/// Returns the card bytes given up.
+pub(crate) fn demote(need: u64, only: Option<(u64, u64)>) -> u64 {
+    let mut hot: Vec<Arc<Shadow>> = {
+        let mut list = HOT_COPIES.lock().unwrap_or_else(|e| e.into_inner());
+        list.retain(|w| w.strong_count() > 0);
+        list.iter().filter_map(std::sync::Weak::upgrade).collect()
+    };
+    hot.retain(|c| only.is_none_or(|(a, b)| c.start >= a && c.start < b));
+    hot.sort_by_key(|c| c.heat.load(Ordering::Relaxed) >> 8);
+    let mut freed = 0;
+    for copy in hot {
+        if freed >= need {
+            break;
+        }
+        if copy.twin_old.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+            continue;
+        }
+        let bytes = copy.card.as_ref().map_or(0, |c| c.size);
+        let done = if copy.window { demote_window(&copy) } else { demote_buffer(&copy) };
+        if done {
+            freed += bytes;
+            DEMOTED[0].fetch_add(1, Ordering::Relaxed);
+            DEMOTED[1].fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+    freed
+}
+
+/// Puts `copy`'s place in its map to `new`, keeping `copy` as `new`'s twin
+/// while anything but the map and the caller has it (`writable`: then it is
+/// not done at all). Whether it was done.
+fn replace_with(copy: &Arc<Shadow>, new: &Arc<Shadow>, writable: bool) -> bool {
+    // The map's handle and the caller's are two counts.
+    let held = crate::host::references(&copy.buffer) > 1 || Arc::strong_count(copy) > 2;
+    if writable && held {
+        return false;
+    }
+    if held {
+        *copy.twin_new.lock().unwrap_or_else(|e| e.into_inner()) = Arc::downgrade(new);
+        *new.twin_old.lock().unwrap_or_else(|e| e.into_inner()) = Some(copy.clone());
+        TWINNED.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(new));
+    }
+    true
+}
+
+/// [`demote`] of a window.
+fn demote_window(copy: &Arc<Shadow>) -> bool {
+    let mut map = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
+    let key = (copy.start, copy.len);
+    if !map.get(&key).is_some_and(|c| Arc::ptr_eq(c, copy)) {
+        return false;
+    }
+    let writable = copy.written_ever();
+    let held = crate::host::references(&copy.buffer) > 1 || Arc::strong_count(copy) > 2;
+    if writable && held {
+        return false;
+    }
+    let Some(new) = window_copy(copy.start, copy.len, None) else {
+        return false;
+    };
+    if !replace_with(copy, &new, writable) {
+        return false;
+    }
+    new.used.store(copy.used.load(Ordering::Relaxed), Ordering::Relaxed);
+    if let Some(old) = map.insert(key, new) {
+        crate::host::retire(old);
+    }
+    true
+}
+
+/// [`demote`] of a title buffer's copy.
+fn demote_buffer(copy: &Arc<Shadow>) -> bool {
+    let mut map = buffers();
+    let Some((key, entry)) = map.iter_mut().find(|(_, e)| e.shadow.as_ref().is_some_and(|c| Arc::ptr_eq(c, copy))) else {
+        return false;
+    };
+    let writable = crate::resource::may_be_written(key.1 as crate::object::This) || copy.written_ever();
+    let held = crate::host::references(&copy.buffer) > 1 || Arc::strong_count(copy) > 2;
+    if writable && held {
+        return false;
+    }
+    let Some(new) = buffer_copy_made(copy.start, copy.len, None) else {
+        return false;
+    };
+    if !replace_with(copy, &new, writable) {
+        return false;
+    }
+    if let Some(old) = entry.shadow.replace(new) {
+        crate::host::retire(old);
+    }
+    true
 }
 
 /// Lets go of the twins that nothing shows or holds any more: no slot
@@ -3899,6 +4010,57 @@ mod hot_window_tests {
         let spans = [(at as usize, at as usize + 2 * PAGE), (at as usize + 2 * PAGE, at as usize + 3 * PAGE + PAGE / 2)];
         copy.noted(&spans, &before, 20);
         assert_eq!(*copy.copied.lock().unwrap(), vec![20, 5, 20, 0]);
+    }
+
+    /// Under pressure, hot copies go back to the PC's memory: a read-only
+    /// one a slot still shows keeps the card copy as its twin, one nothing
+    /// else has is replaced outright; the copies made take the title's
+    /// bytes, and start cold.
+    #[test]
+    fn under_pressure_hot_copies_go_back_to_the_pcs_memory() {
+        if host().is_none() {
+            return; // no host GPU here
+        }
+        TEST_HOT.with(|h| h.set(Some(256)));
+        let memory: &'static [u8] = Vec::leak(vec![3u8; 4 * WINDOW as usize]);
+        let at = (memory.as_ptr() as u64).next_multiple_of(WINDOW);
+        let ask = |address: u64, frame: u64| {
+            TEST_FRAME.with(|f| f.set(Some(frame)));
+            find_any(address + 256, 4096).expect("a window")
+        };
+        // Two windows moved up: one nothing else has, one a slot shows.
+        for frame in 9000..=9000 + HOT_FRAMES {
+            drop(ask(at, frame));
+            drop(ask(at + WINDOW, frame));
+        }
+        let (alone, shown) = (ask(at, 9000 + HOT_FRAMES), ask(at + WINDOW, 9000 + HOT_FRAMES));
+        assert!(alone.carded() && shown.carded(), "both moved up");
+        let slot = shown.buffer.clone();
+        let (alone_ptr, shown_ptr) = (Arc::as_ptr(&alone), Arc::as_ptr(&shown));
+        drop(alone);
+        drop(shown);
+        let freed = super::demote(u64::MAX, Some((at, at + 4 * WINDOW)));
+        assert_eq!(freed, 2 * WINDOW, "both card sides given up");
+        let back = ask(at, 9100);
+        assert!(!back.carded() && Arc::as_ptr(&back) != alone_ptr, "replaced in the PC's memory");
+        assert!(back.twin().is_none(), "nothing else had it: no twin");
+        let back_shown = ask(at + WINDOW, 9100);
+        assert!(!back_shown.carded());
+        assert!(back_shown.replaced(&slot), "the slot's card copy is the twin");
+        assert!(back_shown.twin().is_some_and(|t| Arc::as_ptr(&t) == shown_ptr));
+        // The new copy takes the title's bytes (and the twin with it).
+        // SAFETY: our own memory, inside the window.
+        unsafe { ((back_shown.start + 1024) as *mut u8).write_bytes(7, 64) };
+        let from = back_shown.start as usize + 1024;
+        back_shown.copy(from, from + 64);
+        // SAFETY: inside the copy's CPU-side mapping.
+        let held = unsafe { std::slice::from_raw_parts(back_shown.data.add(1024), 64) };
+        assert!(held.iter().all(|&b| b == 7));
+        // Cold: it does not move up again at once.
+        assert!(!ask(at, 9101).carded());
+        TEST_HOT.with(|h| h.set(None));
+        TEST_FRAME.with(|f| f.set(None));
+        drop(slot);
     }
 }
 

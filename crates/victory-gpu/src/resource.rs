@@ -1570,6 +1570,12 @@ pub(crate) fn reclaim() {
             freed += bytes;
         }
     }
+    // Still short: hot copies go back to the PC's memory before textures
+    // have to (`crate::shadow::demote`).
+    drop(all);
+    if freed < need {
+        freed += crate::shadow::demote(need - freed, None);
+    }
     FREED[0].store(freed, Relaxed);
     FREED[1].store(now, Relaxed);
 }
