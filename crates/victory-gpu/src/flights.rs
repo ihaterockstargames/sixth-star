@@ -1126,6 +1126,7 @@ fn late_child() {
 /// compared with title memory as the title left it.
 #[test]
 fn what_the_gpu_reads_is_the_titles_bytes_whichever_copy_it_reads() {
+    let _one = crate::shadow::HOT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
     use windows::Win32::Graphics::Direct3D12::*;
     let Some(host) = crate::host::host() else {
         return; // no host GPU here
@@ -1309,6 +1310,7 @@ fn what_the_gpu_reads_is_the_titles_bytes_whichever_copy_it_reads() {
 /// words in title memory.
 #[test]
 fn writes_back_and_title_writes_both_reach_whichever_copy_is_read() {
+    let _one = crate::shadow::HOT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
     use windows::Win32::Graphics::Direct3D12::*;
     let Some(host) = crate::host::host() else {
         return; // no host GPU here
@@ -1500,6 +1502,7 @@ fn writes_back_and_title_writes_both_reach_whichever_copy_is_read() {
 #[test]
 #[ignore = "fills the card's memory"]
 fn pressure_stress() {
+    let _one = crate::shadow::HOT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
     let Some(host) = crate::host::host() else {
         return;
     };

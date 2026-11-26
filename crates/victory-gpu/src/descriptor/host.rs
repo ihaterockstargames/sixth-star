@@ -2976,6 +2976,7 @@ mod tests {
     /// copy on the card, and the old one is no longer shown.
     #[test]
     fn a_slot_showing_a_copy_that_moved_is_made_again_from_the_card_copy() {
+        let _hot = crate::shadow::HOT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let Some(heap) = HostHeap::new(false, 8) else {
             return; // no host GPU
         };

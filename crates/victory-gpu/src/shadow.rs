@@ -75,6 +75,12 @@ pub(crate) struct Shadow {
     /// frames in a row up to it (at most 255): a copy asked for frame after
     /// frame is hot ([`moved_up`]).
     heat: AtomicU64,
+    /// Asks in the frame now: the frame shifted up 24 bits, and the count.
+    asks: AtomicU64,
+    /// Asks in the last whole frame: how heavily draws use the copy, for
+    /// which of the hot ones keeps the card when the budget is full
+    /// ([`swap_for`]).
+    rate: AtomicU64,
     /// Moved to the card once hot ([`moved_up`]): its card side is counted
     /// in [`HOT_BYTES`] while it lives.
     hot: std::sync::atomic::AtomicBool,
@@ -425,6 +431,15 @@ static TWINNED: Mutex<Vec<std::sync::Weak<Shadow>>> = Mutex::new(Vec::new());
 /// Notes that `shadow` was asked for in `frame` ([`Shadow::heat`]) and
 /// returns how many frames in a row it has been.
 fn warmed(shadow: &Shadow, frame: u64) -> u64 {
+    // The asks in this frame, and in the last whole one.
+    let asks = shadow.asks.load(Ordering::Relaxed);
+    let (at, count) = (asks >> 24, asks & 0xff_ffff);
+    if at == frame {
+        shadow.asks.store(frame << 24 | (count + 1).min(0xff_ffff), Ordering::Relaxed);
+    } else {
+        shadow.rate.store(if at + 1 == frame { count } else { 0 }, Ordering::Relaxed);
+        shadow.asks.store(frame << 24 | 1, Ordering::Relaxed);
+    }
     let heat = shadow.heat.load(Ordering::Relaxed);
     let (last, run) = (heat >> 8, heat & 0xff);
     if last == frame && run > 0 {
@@ -519,7 +534,14 @@ fn moved_up(
         return None;
     }
     let size = old.len.next_multiple_of(1 << 16);
-    let on_card = hot_card_for(if old.window { old.len } else { size }, frame, old.window)?;
+    let bytes = if old.window { old.len } else { size };
+    if HOT_BYTES.load(Ordering::Relaxed) + bytes > hot_most() {
+        // The budget is full: a copy on the card that draws use much less
+        // may give its place up (at the next sweep, outside the maps' locks).
+        swap_for(old);
+        return None;
+    }
+    let on_card = hot_card_for(bytes, frame, old.window)?;
     let Some(moved) = make(on_card) else {
         // What `hot_card_for` counted for the card side, which went with
         // the copy that was not made.
@@ -557,6 +579,57 @@ fn moved_up(
     Some(moved)
 }
 
+/// Hot copies to put back into the PC's memory at the next sweep, to make
+/// room for ones draws use more ([`swap_for`], [`serve_swaps`]).
+static SWAPS: Mutex<Vec<std::sync::Weak<Shadow>>> = Mutex::new(Vec::new());
+
+/// Since the start: hot copies put back to make room for hotter ones.
+pub(crate) static SWAPPED: AtomicU64 = AtomicU64::new(0);
+
+/// `hot` would go to the card but the budget is full: the hot copy draws
+/// use least is queued to make room, if `hot` is used at least twice as
+/// much in a frame. At most every 100 ms, and one queued at a time.
+fn swap_for(hot: &Shadow) {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = crate::host::now_ms();
+    let last = LAST.load(Ordering::Relaxed);
+    if now < last + 100 || LAST.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_err() {
+        return;
+    }
+    let rate = hot.rate.load(Ordering::Relaxed);
+    let mut swaps = SWAPS.lock().unwrap_or_else(|e| e.into_inner());
+    if !swaps.is_empty() || rate < 2 {
+        return;
+    }
+    let list = HOT_COPIES.lock().unwrap_or_else(|e| e.into_inner());
+    let coldest = list
+        .iter()
+        .filter_map(std::sync::Weak::upgrade)
+        .filter(|c| c.twin_old.lock().unwrap_or_else(|e| e.into_inner()).is_none())
+        .min_by_key(|c| c.rate.load(Ordering::Relaxed));
+    if let Some(cold) = coldest
+        && cold.rate.load(Ordering::Relaxed) * 2 <= rate
+    {
+        swaps.push(Arc::downgrade(&cold));
+    }
+}
+
+/// With the sweep: puts the queued hot copies back ([`swap_for`]).
+fn serve_swaps() {
+    let queued = std::mem::take(&mut *SWAPS.lock().unwrap_or_else(|e| e.into_inner()));
+    for copy in queued.iter().filter_map(std::sync::Weak::upgrade) {
+        let done = if copy.window { demote_window(&copy) } else { demote_buffer(&copy) };
+        if done {
+            SWAPPED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Tests that move hot copies, one at a time: the budget's count and the
+/// list of hot copies are the process's.
+#[cfg(test)]
+pub(crate) static HOT_TESTS: Mutex<()> = Mutex::new(());
+
 /// The copies [`moved_up`] made, for [`demote`].
 static HOT_COPIES: Mutex<Vec<std::sync::Weak<Shadow>>> = Mutex::new(Vec::new());
 
@@ -582,7 +655,8 @@ pub(crate) fn demote(need: u64, only: Option<(u64, u64)>) -> u64 {
         list.iter().filter_map(std::sync::Weak::upgrade).collect()
     };
     hot.retain(|c| only.is_none_or(|(a, b)| c.start >= a && c.start < b));
-    hot.sort_by_key(|c| c.heat.load(Ordering::Relaxed) >> 8);
+    // The ones draws use least first, then the least recently used.
+    hot.sort_by_key(|c| (c.rate.load(Ordering::Relaxed), c.heat.load(Ordering::Relaxed) >> 8));
     let mut freed = 0;
     for copy in hot {
         if freed >= need {
@@ -1985,6 +2059,7 @@ pub(crate) fn window_use() -> [u64; 8] {
 pub(crate) fn let_go_idle() {
     const IDLE_FRAMES: u64 = 4;
     let_go_twins();
+    serve_swaps();
     let gone: Vec<Arc<Shadow>> = {
         // Held from the look to the removal: `loose` hands a copy out
         // under the same lock, so none is handed out in between.
@@ -2149,6 +2224,8 @@ impl Shadow {
             card: None,
             window: false,
             heat: AtomicU64::new(0),
+            asks: AtomicU64::new(0),
+            rate: AtomicU64::new(0),
             hot: std::sync::atomic::AtomicBool::new(false),
             twin_old: Mutex::new(None),
             twin_new: Mutex::new(std::sync::Weak::new()),
@@ -3865,6 +3942,7 @@ mod hot_window_tests {
         if host().is_none() {
             return; // no host GPU here
         }
+        let _one = super::HOT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         TEST_HOT.with(|h| h.set(Some(256)));
         // Title memory of our own, never freed (windows are found by address).
         let memory: &'static [u8] = Vec::leak(vec![7u8; 4 * WINDOW as usize]);
@@ -3954,6 +4032,7 @@ mod hot_window_tests {
         if host().is_none() {
             return; // no host GPU here
         }
+        let _one = super::HOT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         TEST_HOT.with(|h| h.set(Some(256)));
         let ask = |address: u64, frame: u64| {
             TEST_FRAME.with(|f| f.set(Some(frame)));
@@ -4021,6 +4100,7 @@ mod hot_window_tests {
         if host().is_none() {
             return; // no host GPU here
         }
+        let _one = super::HOT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         TEST_HOT.with(|h| h.set(Some(256)));
         let memory: &'static [u8] = Vec::leak(vec![3u8; 4 * WINDOW as usize]);
         let at = (memory.as_ptr() as u64).next_multiple_of(WINDOW);
@@ -4061,6 +4141,48 @@ mod hot_window_tests {
         TEST_HOT.with(|h| h.set(None));
         TEST_FRAME.with(|f| f.set(None));
         drop(slot);
+    }
+
+    /// With the budget full, a copy draws use much more takes the place of
+    /// the one on the card they use least: it is queued, put back at the
+    /// sweep, and the hotter one moves up after.
+    #[test]
+    fn a_hotter_copy_takes_the_place_of_a_colder_one_when_the_budget_is_full() {
+        if host().is_none() {
+            return; // no host GPU here
+        }
+        let _one = super::HOT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        // Room for one window of 4 MiB more than other tests' copies left.
+        let swapped = super::SWAPPED.load(std::sync::atomic::Ordering::Relaxed);
+        TEST_HOT.with(|h| h.set(Some(super::HOT_BYTES.load(std::sync::atomic::Ordering::Relaxed).div_ceil(1 << 20) + 4)));
+        let memory: &'static [u8] = Vec::leak(vec![5u8; 3 * WINDOW as usize]);
+        let at = (memory.as_ptr() as u64).next_multiple_of(WINDOW);
+        let ask = |address: u64, frame: u64| {
+            TEST_FRAME.with(|f| f.set(Some(frame)));
+            find_any(address + 256, 4096).expect("a window")
+        };
+        // The cold one: asked once a frame, moves up first.
+        for frame in 9500..=9500 + HOT_FRAMES {
+            drop(ask(at, frame));
+        }
+        assert!(ask(at, 9500 + HOT_FRAMES).carded(), "the cold one is on the card");
+        // The hot one: asked ten times a frame, finds the budget full.
+        for frame in 9501 + HOT_FRAMES..9520 + HOT_FRAMES {
+            drop(ask(at, frame));
+            for _ in 0..10 {
+                drop(ask(at + WINDOW, frame));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(110));
+            // The sweep serves the queued swap.
+            super::serve_swaps();
+            if ask(at + WINDOW, frame).carded() {
+                break;
+            }
+        }
+        assert!(ask(at + WINDOW, 9600).carded(), "the hotter one took the card");
+        assert!(super::SWAPPED.load(std::sync::atomic::Ordering::Relaxed) > swapped, "by a swap");
+        TEST_HOT.with(|h| h.set(None));
+        TEST_FRAME.with(|f| f.set(None));
     }
 }
 
