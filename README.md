@@ -122,7 +122,7 @@ This is a research project, not a finished emulator. Test reports are useful eve
 | `run.bat selftest` | test the launcher on synthetic files; no title needed |
 | `run.bat tests` | the full test suite (`SIXTH_REQUIRE_GPU=1`: GPU tests must run) |
 | `run.bat membench`, `vkbench`, `dxr-proto`, `vkrt` | GPU benchmarks; CSV results go to the log folder |
-| `ab.bat` | A/B of your own runs: one run per configuration (default: `baseline`, `best`, `bestlate`, `hot1024`, `cardbuf1`), each stopped after 5 minutes, and one report (`logs\ab_<time>\ab-report.md`) with the frame time, CPU preparing, GPU and copy-back times, VRAM, cores, incomplete frames and errors of each. Your `run.config.bat` is not changed. Options: see `scripts\ab.ps1` |
+| `ab.bat` | A/B of your own runs: one run per configuration (default: `baseline`, `best`, `bestlate`, `hot1024`, `cardbuf1`), each stopped after 5 minutes, and one report (`logs\ab_<time>\ab-report.md`) with the frame time, CPU preparing, GPU and copy-back times, VRAM, cores, incomplete frames and errors of each. Your `run.config.bat` is not changed. `ab.bat -Stability` is one 33-minute run for the session length (the report says whether it ran without a crash). Options: see `scripts\ab.ps1` |
 | `run.bat help` | this list |
 
 `run.bat` exits with the title's own exit code, or 1 when a check or the build fails. `NOPAUSE=1` stops it from waiting for a key at the end.
