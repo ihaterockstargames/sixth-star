@@ -9,7 +9,8 @@
 //!
 //! - **eagerly**, for ranges the CPU cannot be stopped from reading (no
 //!   contract says otherwise, or the backend cannot guard them): the
-//!   conservative default, which is what the inherited engine does for all;
+//!   conservative default, which is what the inherited engine does for all,
+//!   and through the inherited compare (see [`Retired::fetch_now`]);
 //! - **on demand**, for ranges the backend guards: the first CPU access
 //!   asks [`Timeline::cpu_access`], which says which submission to wait for
 //!   (only the ones that touch those bytes, not the whole queue) and which
@@ -78,7 +79,12 @@ pub struct Timeline {
 /// What retiring submissions leaves to do.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Retired {
-    /// Bytes to read back now: GPU writes to ranges that are not guarded.
+    /// GPU writes to ranges that are not guarded: they must come back now.
+    /// These are the *declared* writes, usually far more than the bytes
+    /// shaders really wrote, so the backend hands them to the inherited
+    /// compare-and-copy (snapshot, compare, copy what differs), which stays
+    /// the conservative path: copying them back blindly measured three to
+    /// four times slower than comparing (`apps/enginebench`, 2026-11-26).
     pub fetch_now: Vec<Range<u64>>,
     /// Bytes left on the GPU until the CPU asks (guarded ranges).
     pub left_on_gpu: u64,
