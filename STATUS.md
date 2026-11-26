@@ -73,6 +73,11 @@ minutes or more without a crash; that has not been reached or measured.
   in a synthetic frame they make it about 6 times faster (see Notes), but
   they are not measured on the title yet. `ab.bat` runs the defaults and
   them (`best`) one after the other and writes a comparison report.
+- Hot copies give way (since `ecdf692` and `252f632`): when the card fills,
+  hot copies go back to the PC's memory before textures have to, the least
+  used first; with the budget full, copies draws use much more take the
+  place of ones they use little. `VICTORY_HOT_WINDOWS_MB=auto` limits hot
+  copies only by the card's room (`ab.bat` `bestauto`).
 - Texture copies from a buffer's host copy (since `78d67bc`, **off by
   default**): `VICTORY_TEXTURE_FROM_COPY=1` makes a title copy from a buffer
   into a texture read the buffer's host copy, which is kept up to date page
