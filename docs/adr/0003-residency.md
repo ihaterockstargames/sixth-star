@@ -71,7 +71,7 @@ The proportions are not known yet. The ledger (§4) prints them on the frame lin
    - Moves no longer wait for flights to land (`b0ec57b`). Only a writable copy that something holds stays.
    - **Demotion** (`ecdf692`): under pressure the reclaim, after idle textures, puts hot copies back into the PC's memory, least recently used first (`shadow::demote`), the same way they moved up. Textures come first, since a texture in the PC's memory is sampled about 9× slower. `pressure_stress` checks it with the card refilled to 93%.
    - **By use, when the budget is full** (`252f632`): each copy counts its asks per frame. A copy that would move up but finds the byte budget full has the least used hot copy put back at the next sweep, if it is used at least twice as much. Under pressure, the least used go back first.
-   - **`VICTORY_HOT_WINDOWS_MB=auto`** (`9bffd07`): no byte cap of its own; the card's room (`promotable`) is the limit, and demotion guards the textures. The swap acts only on a byte cap.
+   - **`VICTORY_HOT_WINDOWS_MB=auto`** (`9bffd07`): no byte cap of its own; the card's room (`promotable`) is the limit, and demotion guards the textures. The swap acts there too (`48e1306`): a copy kept out only by the card's room has the least used hot copy put back.
    - **Texture copies from host copies** (`78d67bc`, `VICTORY_TEXTURE_FROM_COPY=1`, off): a title copy from a buffer into a texture reads the buffer's host copy instead of filling an upload of its own from title memory. `late_bench` 70.6 → 24.7 ms; textures are read back byte-exact in four modes (`c6c84c3`).
    - Still to do: a writable copy that a list holds. It needs the move to happen when no list that is recorded but not yet submitted names it.
 
