@@ -1272,13 +1272,26 @@ mod tests {
             flags: GRAPHICS | 0x5A << 24,
         };
         let count = || memory_census().into_iter().find(|e| e.0 == class).map_or((0, 0), |e| (e.1, e.2));
-        let before = count();
-        let p = XMemVirtualAlloc(std::ptr::null_mut(), 64 << 10, MEM_RESERVE | MEM_COMMIT, GRAPHICS | 0x5A << 24, protect);
-        assert!(!p.is_null());
-        assert_eq!(count(), (before.0 + 1, before.1 + (64 << 10)));
+        // The census never makes the title's allocator wait: a request made
+        // while another thread holds it (other tests allocate in parallel)
+        // is counted as unsorted instead. So a request may be missed, but
+        // one that is counted is counted exactly, under its class.
+        let mut counted = false;
+        for _ in 0..100 {
+            let before = count();
+            let p = XMemVirtualAlloc(std::ptr::null_mut(), 64 << 10, MEM_RESERVE | MEM_COMMIT, GRAPHICS | 0x5A << 24, protect);
+            assert!(!p.is_null());
+            let after = count();
+            // SAFETY: our own reservation.
+            assert_ne!(unsafe { VirtualFree(p, 0, MEM_RELEASE) }, 0);
+            if after != before {
+                assert_eq!(after, (before.0 + 1, before.1 + (64 << 10)));
+                counted = true;
+                break;
+            }
+        }
+        assert!(counted, "the census never had room for the request");
         assert_eq!(protect & !HOST_PROTECTION, WRITE_COMBINE | GPU_READ_WRITE);
-        // SAFETY: our own reservation.
-        assert_ne!(unsafe { VirtualFree(p, 0, MEM_RELEASE) }, 0);
     }
 
     #[test]
