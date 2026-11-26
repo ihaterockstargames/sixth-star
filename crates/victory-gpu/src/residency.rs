@@ -152,6 +152,18 @@ pub(crate) fn promote(candidates: &[sixth_memory::residency::Candidate]) -> Vec<
     })
 }
 
+/// Where a host copy of title memory goes now
+/// (`sixth_memory::residency::Residency::copy_home`).
+pub(crate) fn copy_home(u: &sixth_memory::residency::CopyUse, hot_frames: u64) -> sixth_memory::residency::CopyHome {
+    let Some(b) = budget() else {
+        return sixth_memory::residency::CopyHome::Stay;
+    };
+    with(|r| {
+        r.observe(&b);
+        r.copy_home(u, &b, hot_frames)
+    })
+}
+
 /// Whether `resource` was made in the PC's memory (a custom heap whose
 /// pool is the system's), by what the device says of it.
 pub(crate) fn in_system(resource: &ID3D12Resource) -> bool {
@@ -181,7 +193,7 @@ pub(crate) fn texture_heap(placement: Placement) -> D3D12_HEAP_PROPERTIES {
 
 /// For the frame line, since the last call.
 pub(crate) fn line() -> Option<String> {
-    static LAST: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
+    static LAST: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
     let now = [
         TEXTURES_IN_SYSTEM.load(Relaxed),
         RECLAIMED[0].load(Relaxed),
@@ -192,6 +204,11 @@ pub(crate) fn line() -> Option<String> {
         SLOTS_REMADE.load(Relaxed),
         crate::shadow::HOT_WINDOWS[0].load(Relaxed),
         crate::shadow::HOT_WINDOWS[1].load(Relaxed),
+        crate::shadow::HOT_BUFFERS[0].load(Relaxed),
+        crate::shadow::HOT_BUFFERS[1].load(Relaxed),
+        crate::shadow::HOT_SLOTS.load(Relaxed),
+        crate::shadow::TWINS_GONE.load(Relaxed),
+        crate::shadow::TWIN_WRITES.load(Relaxed),
     ];
     let d: Vec<u64> = now.iter().zip(&LAST).map(|(n, l)| n - l.swap(*n, Relaxed)).collect();
     let pressure = with(|r| r.pressure());
@@ -199,7 +216,7 @@ pub(crate) fn line() -> Option<String> {
     Some(format!(
         "residency: pressure {pressure:?}; since the last line {} textures made in the PC's memory for lack of room on the card \
          ({} since the start, {alive} alive, {:.0} MiB), {} idle textures given up ({:.0} MiB), {} back on the card ({:.0} MiB, {} slots made again), {} texture passes with no room in either pool; \
-         {} hot windows moved to the card ({:.0} MiB)",
+         hot copies moved to the card: {} windows ({:.0} MiB), {} title buffers ({:.0} MiB), {} slots made again from them,          {} old copies let go, {} shader writes declared for a copy with a twin",
         d[0],
         now[0],
         bytes as f64 / f64::from(1u32 << 20),
@@ -210,7 +227,12 @@ pub(crate) fn line() -> Option<String> {
         d[6],
         d[3],
         d[7],
-        d[8] as f64 / f64::from(1u32 << 20)
+        d[8] as f64 / f64::from(1u32 << 20),
+        d[9],
+        d[10] as f64 / f64::from(1u32 << 20),
+        d[11],
+        d[12],
+        d[13]
     ))
 }
 

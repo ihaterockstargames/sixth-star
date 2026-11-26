@@ -32,7 +32,7 @@ pub use forward::{CostModel, Plan, Planner, Run};
 pub use space::{Action, AddressSpace, MapError, PageEntry, PageRef, RegionId};
 pub use ranges::RangeSet;
 pub use registry::{Registry, ResourceId, Version};
-pub use residency::{Budget, Candidate, Class, Placement, Pressure, Residency};
+pub use residency::{Budget, Candidate, Class, CopyHome, CopyUse, Placement, Pressure, Residency};
 pub use timeline::{CpuPlan, Hazard, Retired, SubmitPlan, Timeline};
 
 /// A page: the unit of the page table, of residency and of ownership.

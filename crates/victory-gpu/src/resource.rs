@@ -1285,6 +1285,14 @@ fn fills(desc: &ResourceDesc) -> bool {
     desc.dimension != BUFFER && desc.flags & TARGET_DEPTH_UNORDERED == 0
 }
 
+/// Whether shaders may write title buffer `this`: it was made for
+/// unordered access (or is not a buffer we know).
+#[cfg(windows)]
+pub(crate) fn may_be_written(this: This) -> bool {
+    const UNORDERED: u32 = 4;
+    this.is_null() || resource(this).desc.flags & UNORDERED != 0
+}
+
 /// Whether the title fills texture `this` itself ([`fills`]).
 #[cfg(windows)]
 pub(crate) fn title_fills(this: This) -> bool {
@@ -2904,6 +2912,19 @@ pub(crate) mod tests {
         assert!(!shows_stale(this, &second));
         // Nothing more to bring back.
         assert_eq!(promote_idle(0, 0), 0);
+    }
+
+    /// A title buffer of `len` bytes in memory of its own (committed), with
+    /// the description's flags (4: unordered access), and its address.
+    pub(crate) fn title_buffer(len: u64, flags: u32) -> (This, u64) {
+        let mut out = std::ptr::null();
+        let desc = ResourceDesc { flags, ..buffer(len) };
+        assert_eq!(
+            create_committed(std::ptr::null(), &PROPERTIES, 0, &desc, 0, std::ptr::null(), &RESOURCE_IIDS[0], &mut out),
+            S_OK
+        );
+        let (data, _) = buffer_bytes(out).expect("a buffer");
+        (out, data as u64)
     }
 
     /// The tests that give up copies in the PC's memory (any test's), one

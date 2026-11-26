@@ -111,6 +111,39 @@ pub struct Candidate {
     pub held: bool,
 }
 
+/// What the backend knows of a host copy of title memory (a window or a
+/// title buffer's copy) when it decides where the copy lives: one rule for
+/// every kind of copy ([`Residency::copy_home`]), instead of a size limit
+/// per kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CopyUse {
+    /// The bytes it would take on the card.
+    pub bytes: u64,
+    /// Frames in a row in which something used it.
+    pub frames_in_a_row: u64,
+    /// Shaders may write it (an unordered-access resource, or writes were
+    /// declared for it): what they write must come back to title memory,
+    /// and a second copy of the same memory would not see it.
+    pub gpu_writable: bool,
+    /// It is title memory opened as a heap: no copy, nothing to move.
+    pub in_place: bool,
+    /// It already has a side on the card.
+    pub on_card: bool,
+    /// Submissions may be in flight while it moves (the late wait): a
+    /// refresh of the new copy could read title memory a flight is still
+    /// to write back.
+    pub flights: bool,
+}
+
+/// Where a host copy of title memory goes ([`Residency::copy_home`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopyHome {
+    /// Stays where it is.
+    Stay,
+    /// Made again with a side on the card.
+    Card,
+}
+
 /// The thresholds, as shares of the card's budget.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Policy {
@@ -277,6 +310,21 @@ impl Residency {
         let permille = ((p.target - 2.0 * p.margin) * 1000.0).round().max(0.0) as u128;
         let goal = (u128::from(budget.local_budget) * permille / 1000) as u64;
         goal.saturating_sub(budget.local_used)
+    }
+
+    /// Where a host copy of title memory now in the PC's memory goes:
+    /// to the card once it has been used `hot_frames` frames in a row, while
+    /// the card has room for it ([`Residency::promotable`]), unless shaders
+    /// may write it, it is title memory itself, it is on the card already,
+    /// or submissions may be in flight.
+    pub fn copy_home(&self, u: &CopyUse, budget: &Budget, hot_frames: u64) -> CopyHome {
+        if u.in_place || u.on_card || u.gpu_writable || u.flights || u.frames_in_a_row < hot_frames {
+            return CopyHome::Stay;
+        }
+        if u.bytes == 0 || self.promotable(budget) < u.bytes {
+            return CopyHome::Stay;
+        }
+        CopyHome::Card
     }
 
     /// Which of `candidates` (resources in the PC's memory) to make again
@@ -457,5 +505,23 @@ mod tests {
         assert_eq!(r.promotable(&at(80)), 0);
         assert_eq!(r.promotable(&Budget::default()), 0, "no budget reported: nothing moves");
         assert_eq!(r.stats.promoted, 5);
+    }
+
+    #[test]
+    fn a_copy_goes_to_the_card_when_hot_read_only_and_there_is_room() {
+        let mut r = Residency::default();
+        r.observe(&at(50));
+        let hot = CopyUse { bytes: GIB, frames_in_a_row: 8, gpu_writable: false, in_place: false, on_card: false, flights: false };
+        assert_eq!(r.copy_home(&hot, &at(50), 8), CopyHome::Card);
+        assert_eq!(r.copy_home(&CopyUse { frames_in_a_row: 7, ..hot }, &at(50), 8), CopyHome::Stay, "not hot yet");
+        assert_eq!(r.copy_home(&CopyUse { gpu_writable: true, ..hot }, &at(50), 8), CopyHome::Stay, "shaders write it");
+        assert_eq!(r.copy_home(&CopyUse { in_place: true, ..hot }, &at(50), 8), CopyHome::Stay, "title memory itself");
+        assert_eq!(r.copy_home(&CopyUse { on_card: true, ..hot }, &at(50), 8), CopyHome::Stay, "there already");
+        assert_eq!(r.copy_home(&CopyUse { flights: true, ..hot }, &at(50), 8), CopyHome::Stay, "flights in the air");
+        // Room up to 80 %: 29 GiB at 50 of 100 GiB, not 31.
+        assert_eq!(r.copy_home(&CopyUse { bytes: 29 * GIB, ..hot }, &at(50), 8), CopyHome::Card);
+        assert_eq!(r.copy_home(&CopyUse { bytes: 31 * GIB, ..hot }, &at(50), 8), CopyHome::Stay, "no room");
+        r.observe(&at(91));
+        assert_eq!(r.copy_home(&hot, &at(91), 8), CopyHome::Stay, "at High pressure nothing moves up");
     }
 }

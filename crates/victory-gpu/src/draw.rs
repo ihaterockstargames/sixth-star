@@ -1426,9 +1426,19 @@ impl State {
             let Some(handle) = heap.handle(index) else {
                 continue;
             };
-            let Some(view) = host.mirror(index, handle, true) else {
+            let Some(mut view) = host.mirror(index, handle, true) else {
                 continue;
             };
+            // As in `table_entry`: made again from a hot copy that replaced
+            // the one it shows.
+            if crate::shadow::moved_any()
+                && let Some((copy, _, _)) = crate::descriptor::host::buffer_copy(&view)
+                && host.shows_replaced(index, &copy)
+                && let Some(again) = host.remake(index, handle)
+            {
+                crate::shadow::HOT_SLOTS.fetch_add(1, Ordering::Relaxed);
+                view = again;
+            }
             // Every 64 views while the device lives (a cheap query).
             if alive
                 && n % 64 == 63
@@ -2065,7 +2075,18 @@ impl State {
         let (Some(host), Some(index)) = (heap.host(), heap.index(handle)) else {
             return;
         };
-        if let Some(view) = host.mirror(index, handle, true) {
+        if let Some(mut view) = host.mirror(index, handle, true) {
+            // A slot that shows a copy a hot one replaced is made again
+            // from the new one (`shadow::moved_up`): both are current
+            // until then, so either is right for lists already recorded.
+            if crate::shadow::moved_any()
+                && let Some((copy, _, _)) = crate::descriptor::host::buffer_copy(&view)
+                && host.shows_replaced(index, &copy)
+                && let Some(again) = host.remake(index, handle)
+            {
+                crate::shadow::HOT_SLOTS.fetch_add(1, Ordering::Relaxed);
+                view = again;
+            }
             readable(list, u.kind, &view);
             // Up to date by this draw: not the texture pass's to make.
             if crate::descriptor::host::is_texture_view(&view) {

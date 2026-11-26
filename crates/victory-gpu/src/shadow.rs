@@ -72,9 +72,28 @@ pub(crate) struct Shadow {
     /// A window of title memory outside buffers, not a title buffer's copy.
     window: bool,
     /// The last frame it was asked for, shifted up 8 bits, and how many
-    /// frames in a row up to it (at most 255): a window asked for frame
-    /// after frame is hot ([`hot_window_card_for`]).
+    /// frames in a row up to it (at most 255): a copy asked for frame after
+    /// frame is hot ([`moved_up`]).
     heat: AtomicU64,
+    /// Moved to the card once hot ([`moved_up`]): its card side is counted
+    /// in [`HOT_BYTES`] while it lives.
+    hot: std::sync::atomic::AtomicBool,
+    /// Of a copy made by [`moved_up`]: the copy it replaced, while a
+    /// descriptor slot still shows that one (or a list still holds it). Both
+    /// are brought up to date together ([`Shadow::copy`]), so whichever a
+    /// slot shows when a list runs holds the title's bytes; the slot is made
+    /// again from this copy when a draw next reads it, and the old one goes
+    /// once nothing shows or holds it ([`let_go_twins`]).
+    twin_old: Mutex<Option<Arc<Shadow>>>,
+    /// Of a copy replaced by [`moved_up`]: the copy that replaced it.
+    twin_new: Mutex<std::sync::Weak<Shadow>>,
+    /// Ranges (offsets) that shaders wrote through the twin: title memory
+    /// gets those bytes back after the twin's submission, but no write watch
+    /// tells of them, so this copy takes them again at its next refresh
+    /// once the twin has nothing in flight there ([`Shadow::update`]).
+    twin_wrote: Mutex<Vec<(usize, usize)>>,
+    /// Shaders were declared to write it at least once.
+    wrote: std::sync::atomic::AtomicBool,
     /// With `crate::inplace`: not a copy at all. `buffer` is placed in a
     /// heap opened on the title memory itself, so shaders read and write
     /// the title's own bytes and nothing is copied either way. The heap,
@@ -289,28 +308,38 @@ fn window_card_for(size: u64) -> Option<ID3D12Resource> {
     buffer
 }
 
-/// The most bytes of windows whose copies move to the card's memory once
-/// they are hot (`VICTORY_HOT_WINDOWS_MB`; 0, the default, none: the A/B
-/// switch until a run has measured it, ADR 0003 section 5.2).
+/// The most bytes of host copies that move to the card's memory once they
+/// are hot (`VICTORY_HOT_WINDOWS_MB`; 0, the default, none: the A/B switch
+/// until a run has measured it, ADR 0003 section 5.2). It covers windows of
+/// title memory outside buffers and copies of title buffers shaders cannot
+/// write, by one rule (`sixth_memory::residency::Residency::copy_home`).
 ///
-/// [`window_card_most`] decides when a window is made, which is when the
-/// world loads, before anything is known of how often draws read it. Here a
-/// window made in the PC's memory, which every draw that uses it reads over
-/// the bus, is made again with a card side once draws have asked for it in
-/// [`HOT_FRAMES`] frames in a row, while the card has room for it
-/// (`crate::residency::promotable`, which stops short of the textures'
-/// target) and no descriptor slot views it (a slot would go on showing the
-/// copy in the PC's memory, which nothing brings up to date once it has
-/// gone). The new copy is filled from title memory by its first refresh, as
-/// any new copy is; lists recorded with the old one keep it, and bring it
-/// up to date, until they are reset. At most [`HOT_BYTES_PER_FRAME`] move
-/// in a frame.
+/// A copy is made when the title first uses its memory, before anything is
+/// known of how often draws read it, and the size limits that decided its
+/// place then (16 MiB and more for title buffers, `window_card_most` for
+/// windows) say nothing of that. Here a copy in the PC's memory, which
+/// every draw that uses it reads over the bus, is made again with a card
+/// side once it has been asked for in [`HOT_FRAMES`] frames in a row, while
+/// the card has room for it (`crate::residency::promotable`, which stops
+/// short of the textures' target), unless shaders may write it (what they
+/// write must come back to title memory, and a second copy would not see
+/// it), it is title memory opened in place, or submissions may be in flight
+/// (`crate::host::late`). At most [`HOT_BYTES_PER_FRAME`] move in a frame.
 ///
-/// What it costs: what the title writes in such a window goes up to the
-/// card before each submission (`Host::card_before`), once, where the GPU
-/// read it over the bus as often as draws read it. A window the title
-/// rewrites whole every frame and draws read once gains nothing.
-fn hot_windows_most() -> u64 {
+/// The new copy is filled from title memory by its first refresh, as any
+/// new copy is. Lists recorded with the old one keep it. A descriptor slot
+/// that shows the old one goes on showing it until a draw reads the slot
+/// again, which makes it from the new one (`draw.rs`); until then, and
+/// while any list holds the old one, both copies are brought up to date
+/// together ([`Shadow::copy`]), so whichever a list's slots show when it
+/// runs holds the title's bytes.
+///
+/// What it costs: what the title writes in such a copy goes up to the card
+/// before each submission (`Host::card_before`), once, where the GPU read
+/// it over the bus as often as draws read it; and while a twin is kept, its
+/// refreshes are done twice. A window the title rewrites whole every frame
+/// and draws read once gains nothing.
+fn hot_most() -> u64 {
     #[cfg(test)]
     if TEST_HOT.with(std::cell::Cell::get) {
         return 256 << 20;
@@ -323,10 +352,18 @@ fn hot_windows_most() -> u64 {
 
 #[cfg(test)]
 thread_local! {
-    /// Tests: hot windows move on this thread whatever the switch says.
+    /// Tests: hot copies move on this thread whatever the switch says.
     static TEST_HOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Tests: the frame this thread's asks are in.
     static TEST_FRAME: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Tests: hot copies move on this thread (`on`), and its asks are in
+/// `frame`.
+#[cfg(test)]
+pub(crate) fn test_hot(on: bool, frame: Option<u64>) {
+    TEST_HOT.with(|h| h.set(on));
+    TEST_FRAME.with(|f| f.set(frame));
 }
 
 /// The frame now, for [`warmed`].
@@ -338,14 +375,31 @@ fn frame_now() -> u64 {
     crate::frame::current()
 }
 
-/// Frames in a row a window must be asked for to move to the card.
+/// Frames in a row a copy must be asked for to move to the card.
 const HOT_FRAMES: u64 = 8;
 
-/// The most bytes of windows moved to the card in one frame.
+/// The most bytes of copies moved to the card in one frame.
 const HOT_BYTES_PER_FRAME: u64 = 64 << 20;
 
-/// Since the start: windows moved to the card once hot, and their bytes.
+/// Since the start: windows moved to the card once hot and their bytes;
+/// title-buffer copies likewise and their bytes; slots made again from a
+/// moved copy; twins let go; shader writes declared for a copy that has a
+/// twin (ranges the other copy takes again).
 pub(crate) static HOT_WINDOWS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+pub(crate) static HOT_BUFFERS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+pub(crate) static HOT_SLOTS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static TWINS_GONE: AtomicU64 = AtomicU64::new(0);
+pub(crate) static TWIN_WRITES: AtomicU64 = AtomicU64::new(0);
+
+/// Bytes alive of card sides made by [`moved_up`].
+static HOT_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Whether any copy was ever moved: the draws look for slots to make again
+/// only then.
+static MOVED_ANY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The copies made by [`moved_up`] that keep a twin.
+static TWINNED: Mutex<Vec<std::sync::Weak<Shadow>>> = Mutex::new(Vec::new());
 
 /// Notes that `shadow` was asked for in `frame` ([`Shadow::heat`]) and
 /// returns how many frames in a row it has been.
@@ -360,26 +414,34 @@ fn warmed(shadow: &Shadow, frame: u64) -> u64 {
     run
 }
 
-/// Whether `shadow`, a window asked for `run` frames in a row, is one to
-/// move to the card: a window in the PC's memory that no descriptor slot
-/// views, asked for often enough. Room is [`hot_window_card_for`]'s to
-/// decide.
-fn hot(shadow: &Shadow, run: u64) -> bool {
-    shadow.window
-        && shadow.card.is_none()
-        && shadow.place.is_none()
-        && run >= HOT_FRAMES
-        && crate::host::references(&shadow.buffer) == 1
+/// Whether `shadow`, asked for `run` frames in a row, goes to the card now
+/// (`sixth_memory::residency::Residency::copy_home`). `writable`: the title
+/// resource it copies may be written by shaders (windows: unknown, so by
+/// what was declared for it).
+fn goes_up(shadow: &Shadow, run: u64, writable: bool) -> bool {
+    let has_twin = shadow.twin_old.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+        || shadow.twin_new.lock().unwrap_or_else(|e| e.into_inner()).strong_count() > 0;
+    let pending = !shadow.pending.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
+    let u = sixth_memory::residency::CopyUse {
+        bytes: shadow.len.next_multiple_of(1 << 16),
+        frames_in_a_row: run,
+        gpu_writable: writable || pending || shadow.written_ever(),
+        in_place: shadow.place.is_some(),
+        on_card: shadow.card.is_some() || has_twin,
+        flights: crate::host::late(),
+    };
+    crate::residency::copy_home(&u, HOT_FRAMES) == sixth_memory::residency::CopyHome::Card
 }
 
-/// A card side for a hot window of `size` bytes ([`hot_windows_most`]), if
-/// there is room: under the switch's bytes, within what may come to the
-/// card without raising the pressure, and within this frame's share.
-fn hot_window_card_for(size: u64, frame: u64) -> Option<ID3D12Resource> {
+/// A card side for a hot copy of `size` bytes ([`hot_most`]), if there is
+/// room under the switch's bytes and within this frame's share (the card's
+/// own room is [`goes_up`]'s), counted as a window's or a title buffer's
+/// card side, as its copy's drop will count it off.
+fn hot_card_for(size: u64, frame: u64, window: bool) -> Option<ID3D12Resource> {
     static FRAME: AtomicU64 = AtomicU64::new(0);
     static MOVED: AtomicU64 = AtomicU64::new(0);
-    let most = hot_windows_most();
-    if most == 0 || !cards() {
+    let most = hot_most();
+    if most == 0 || !cards() || size >= 1 << 30 {
         return None;
     }
     let host = host()?;
@@ -389,11 +451,11 @@ fn hot_window_card_for(size: u64, frame: u64) -> Option<ID3D12Resource> {
     if FRAME.swap(frame, Ordering::Relaxed) != frame {
         MOVED.store(0, Ordering::Relaxed);
     }
-    if MOVED.load(Ordering::Relaxed) + size > HOT_BYTES_PER_FRAME || crate::residency::promotable() < size {
+    if MOVED.load(Ordering::Relaxed) + size > HOT_BYTES_PER_FRAME {
         return None;
     }
-    if WINDOW_CARD_BYTES.fetch_add(size, Ordering::Relaxed) + size > most + window_card_most() {
-        WINDOW_CARD_BYTES.fetch_sub(size, Ordering::Relaxed);
+    if HOT_BYTES.fetch_add(size, Ordering::Relaxed) + size > most {
+        HOT_BYTES.fetch_sub(size, Ordering::Relaxed);
         return None;
     }
     let buffer = {
@@ -401,10 +463,90 @@ fn hot_window_card_for(size: u64, frame: u64) -> Option<ID3D12Resource> {
         host.uav_buffer(size)
     };
     match &buffer {
-        Some(_) => MOVED.fetch_add(size, Ordering::Relaxed),
-        None => WINDOW_CARD_BYTES.fetch_sub(size, Ordering::Relaxed),
-    };
+        Some(_) => {
+            MOVED.fetch_add(size, Ordering::Relaxed);
+            if window {
+                WINDOW_CARD_BYTES.fetch_add(size, Ordering::Relaxed);
+            } else {
+                CARD_BYTES[0].fetch_add(size, Ordering::Relaxed);
+            }
+        }
+        None => {
+            HOT_BYTES.fetch_sub(size, Ordering::Relaxed);
+        }
+    }
     buffer
+}
+
+/// Makes `old`, hot, again with a card side, if [`goes_up`] says so and
+/// there is room: `make` makes the new copy from the card side. Returns the
+/// new copy, which takes `old`'s place in its map; `old` is kept as its
+/// twin while a slot shows it or a list holds it ([`Shadow::twin_old`]),
+/// else retired.
+fn moved_up(
+    old: &Arc<Shadow>,
+    run: u64,
+    writable: bool,
+    frame: u64,
+    make: impl FnOnce(ID3D12Resource) -> Option<Arc<Shadow>>,
+) -> Option<Arc<Shadow>> {
+    if !goes_up(old, run, writable) {
+        return None;
+    }
+    let size = old.len.next_multiple_of(1 << 16);
+    let on_card = hot_card_for(if old.window { old.len } else { size }, frame, old.window)?;
+    let Some(moved) = make(on_card) else {
+        HOT_BYTES.fetch_sub(if old.window { old.len } else { size }, Ordering::Relaxed);
+        return None;
+    };
+    moved.hot.store(true, Ordering::Relaxed);
+    moved.heat.store(old.heat.load(Ordering::Relaxed), Ordering::Relaxed);
+    let counts = if old.window { &HOT_WINDOWS } else { &HOT_BUFFERS };
+    counts[0].fetch_add(1, Ordering::Relaxed);
+    counts[1].fetch_add(old.len, Ordering::Relaxed);
+    MOVED_ANY.store(true, Ordering::Relaxed);
+    tracing::debug!(
+        start = format_args!("{:#x}", old.start),
+        len = old.len,
+        window = old.window,
+        run,
+        "a hot copy moves to the card"
+    );
+    // Twins while anything else has the old one: a slot (it holds the
+    // buffer) or a list (it holds the copy; the map's handle, which goes
+    // now, is the one other count).
+    if crate::host::references(&old.buffer) > 1 || Arc::strong_count(old) > 1 {
+        *old.twin_new.lock().unwrap_or_else(|e| e.into_inner()) = Arc::downgrade(&moved);
+        *moved.twin_old.lock().unwrap_or_else(|e| e.into_inner()) = Some(old.clone());
+        TWINNED.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&moved));
+    }
+    Some(moved)
+}
+
+/// Lets go of the twins that nothing shows or holds any more: no slot
+/// shows their buffer and no list holds them ([`Shadow::twin_old`]). With
+/// the sweep, once a second.
+fn let_go_twins() {
+    let mut twinned = TWINNED.lock().unwrap_or_else(|e| e.into_inner());
+    twinned.retain(|weak| {
+        let Some(new) = weak.upgrade() else {
+            return false;
+        };
+        let mut twin = new.twin_old.lock().unwrap_or_else(|e| e.into_inner());
+        let idle = twin
+            .as_ref()
+            .is_some_and(|old| Arc::strong_count(old) == 1 && crate::host::references(&old.buffer) == 1);
+        if idle && let Some(old) = twin.take() {
+            TWINS_GONE.fetch_add(1, Ordering::Relaxed);
+            crate::host::retire(old);
+        }
+        twin.is_some()
+    });
+}
+
+/// Whether draws should look for slots that show a copy moved up.
+pub(crate) fn moved_any() -> bool {
+    MOVED_ANY.load(Ordering::Relaxed)
 }
 
 /// The copies in the card's memory whose CPU side changed since they were
@@ -1529,6 +1671,9 @@ impl Drop for Shadow {
         }
         let window = self.window;
         if let Some(card) = &mut self.card {
+            if self.hot.load(Ordering::Relaxed) {
+                HOT_BYTES.fetch_sub(card.size, Ordering::Relaxed);
+            }
             if window {
                 WINDOW_CARD_BYTES.fetch_sub(card.size, Ordering::Relaxed);
             } else {
@@ -1695,6 +1840,7 @@ pub(crate) fn window_use() -> [u64; 8] {
 /// again. Called before a submission starts, by the thread that submits.
 pub(crate) fn let_go_idle() {
     const IDLE_FRAMES: u64 = 4;
+    let_go_twins();
     let gone: Vec<Arc<Shadow>> = {
         // Held from the look to the removal: `loose` hands a copy out
         // under the same lock, so none is handed out in between.
@@ -1859,6 +2005,11 @@ impl Shadow {
             card: None,
             window: false,
             heat: AtomicU64::new(0),
+            hot: std::sync::atomic::AtomicBool::new(false),
+            twin_old: Mutex::new(None),
+            twin_new: Mutex::new(std::sync::Weak::new()),
+            twin_wrote: Mutex::default(),
+            wrote: std::sync::atomic::AtomicBool::new(false),
             place: None,
         }
     }
@@ -1889,6 +2040,18 @@ impl Shadow {
             return;
         }
         let len = len.min(self.left(address));
+        self.wrote.store(true, Ordering::Relaxed);
+        // The other copy of a pair takes these bytes again once they are
+        // back in title memory ([`Shadow::twin_wrote`]). Read through it in
+        // the same submission, it shows them as they were: counted.
+        if let Some(twin) = self.twin() {
+            let (from, _) = self.inside(address as usize, len as usize);
+            twin.twin_wrote
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((from, from + len as usize));
+            TWIN_WRITES.fetch_add(1, Ordering::Relaxed);
+        }
         list.defer_gpu_write(self, address as usize, len as usize);
     }
 
@@ -2495,6 +2658,7 @@ impl Shadow {
         if from >= to {
             return 0;
         }
+        self.take_twin_writes(from, to);
         let mut busy: Vec<(usize, usize)> = self
             .pending
             .lock()
@@ -2588,8 +2752,71 @@ impl Shadow {
         bytes
     }
 
-    /// Copies title memory `[from, to)`, cut to the buffer, into the copy.
+    /// Copies title memory `[from, to)`, cut to the buffer, into the copy,
+    /// and into its twin if it has one ([`Shadow::twin_old`]): whichever of
+    /// the two a slot shows holds what this refresh took.
     fn copy(&self, from: usize, to: usize) -> usize {
+        let bytes = self.copy_one(from, to);
+        if let Some(twin) = self.twin() {
+            twin.copy_one(from, to);
+        }
+        bytes
+    }
+
+    /// The other copy of a pair made by [`moved_up`], if there is one.
+    fn twin(&self) -> Option<Arc<Shadow>> {
+        if let Some(old) = self.twin_old.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            return Some(old.clone());
+        }
+        self.twin_new.lock().unwrap_or_else(|e| e.into_inner()).upgrade()
+    }
+
+    /// Whether shaders were ever declared to write this copy.
+    fn written_ever(&self) -> bool {
+        !self.twin_wrote.lock().unwrap_or_else(|e| e.into_inner()).is_empty() || self.wrote.load(Ordering::Relaxed)
+    }
+
+    /// Whether `buffer` is the buffer shaders see of this copy's old twin
+    /// (a slot showing it is to be made again from this copy).
+    pub(crate) fn replaced(&self, buffer: &ID3D12Resource) -> bool {
+        self.twin_old
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|old| windows::core::Interface::as_raw(&old.buffer) == windows::core::Interface::as_raw(buffer))
+    }
+
+    /// Ranges its twin's shaders wrote whose bytes title memory has by now
+    /// (the twin has nothing in flight there): copied again.
+    fn take_twin_writes(&self, from: usize, to: usize) {
+        let mut wrote = self.twin_wrote.lock().unwrap_or_else(|e| e.into_inner());
+        if wrote.is_empty() {
+            return;
+        }
+        let Some(twin) = self.twin() else {
+            wrote.clear();
+            return;
+        };
+        let busy = twin.pending.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let (start, _) = (self.start as usize, 0);
+        let mut left = Vec::new();
+        for &(a, e) in wrote.iter() {
+            let (at, end) = (start + a, start + e);
+            if at >= to || end <= from {
+                left.push((a, e));
+                continue;
+            }
+            if busy.iter().any(|&(b, f)| b < end && f > at) {
+                left.push((a, e));
+                continue;
+            }
+            self.copy_one(at, end);
+        }
+        *wrote = left;
+    }
+
+    /// [`Shadow::copy`] of this copy alone.
+    fn copy_one(&self, from: usize, to: usize) -> usize {
         let _cpu = crate::cpuprof::timed(crate::cpuprof::Work::Refresh);
         let (start, end) = (self.start as usize, (self.start + self.len) as usize);
         let (from, to) = (from.max(start), to.min(end));
@@ -2917,6 +3144,20 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
         return loose(address, end, len <= 1, any);
     };
     let entry = map.get_mut(&key)?;
+    if let Some(shadow) = &entry.shadow
+        && hot_most() > 0
+    {
+        let frame = frame_now();
+        let run = warmed(shadow, frame);
+        let writable = crate::resource::may_be_written(key.1 as crate::object::This);
+        let (start, len) = (key.0, entry.end - key.0);
+        if let Some(moved) = moved_up(shadow, run, writable, frame, |on_card| buffer_copy_made(start, len, Some(on_card))) {
+            if let Some(old) = entry.shadow.replace(moved.clone()) {
+                crate::host::retire(old);
+            }
+            return Some(moved);
+        }
+    }
     if entry.shadow.is_none() {
         let len = entry.end - key.0;
         // Rounded up so that views ending in the buffer's last 256 bytes fit.
@@ -2931,56 +3172,67 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
             entry.shadow = Some(Arc::new(Shadow::placed(placed, key.0, len, false)));
             return entry.shadow.clone();
         }
-        let (buffer, data) = {
-            let _as = crate::ledger::booking_as(crate::ledger::Cat::BufferCopy);
-            host()?.shared_buffer(size)?
-        };
-        crate::host::name(&buffer, || format!("title buffer {:#x}+{len:#x}", key.0));
         // A big one, with `cards`: shaders get a buffer in the card's own
-        // memory, and the one just made is the CPU's side.
-        let (buffer, card) = match card_for(size) {
-            Some(on_card) => {
-                crate::host::name(&on_card, || format!("title buffer {:#x}+{len:#x} on the card", key.0));
-                tracing::info!(
-                    start = format_args!("{:#x}", key.0),
-                    len,
-                    "a buffer's host copy is in the card's memory"
-                );
-                let card = Card {
-                    staging: buffer,
-                    before: Mutex::default(),
-                    dirty: Mutex::default(),
-                    sent: Mutex::default(),
-                    size,
-                };
-                (on_card, Some(card))
-            }
-            None => (buffer, None),
-        };
-        // SAFETY: a live buffer.
-        let gpu = unsafe { buffer.GetGPUVirtualAddress() };
-        if len >= 16 << 20 {
-            tracing::info!(
-                start = format_args!("{:#x}", key.0),
-                len,
-                "large buffer copied to the host"
-            );
-        } else {
-            tracing::debug!(
-                start = format_args!("{:#x}", key.0),
-                len,
-                "buffer copied to the host"
-            );
-        }
-        let mut shadow = Shadow::new(buffer, data, gpu, key.0, len);
-        shadow.card = card;
-        let shadow = Arc::new(shadow);
-        if shadow.card.is_some() {
-            CARDED.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&shadow));
-        }
-        entry.shadow = Some(shadow);
+        // memory, and the one made in the PC's memory is the CPU's side.
+        entry.shadow = Some(buffer_copy_made(key.0, len, card_for(size))?);
     }
     entry.shadow.clone()
+}
+
+/// A new copy of the title buffer `[start, start + len)`, in the PC's
+/// memory, or with `on_card` (its size rounded up to 64 KiB) as the side
+/// shaders see and the PC's memory as the CPU's side. Filled by its first
+/// refresh.
+fn buffer_copy_made(start: u64, len: u64, on_card: Option<ID3D12Resource>) -> Option<Arc<Shadow>> {
+    // Rounded up so that views ending in the buffer's last 256 bytes fit.
+    // Shaders write some buffers (unordered access), so not upload memory.
+    let size = len.next_multiple_of(1 << 16);
+    let (buffer, data) = {
+        let _as = crate::ledger::booking_as(crate::ledger::Cat::BufferCopy);
+        host()?.shared_buffer(size)?
+    };
+    crate::host::name(&buffer, || format!("title buffer {start:#x}+{len:#x}"));
+    let (buffer, card) = match on_card {
+        Some(on_card) => {
+            crate::host::name(&on_card, || format!("title buffer {start:#x}+{len:#x} on the card"));
+            tracing::info!(
+                start = format_args!("{start:#x}"),
+                len,
+                "a buffer's host copy is in the card's memory"
+            );
+            let card = Card {
+                staging: buffer,
+                before: Mutex::default(),
+                dirty: Mutex::default(),
+                sent: Mutex::default(),
+                size,
+            };
+            (on_card, Some(card))
+        }
+        None => (buffer, None),
+    };
+    // SAFETY: a live buffer.
+    let gpu = unsafe { buffer.GetGPUVirtualAddress() };
+    if len >= 16 << 20 {
+        tracing::info!(
+            start = format_args!("{start:#x}"),
+            len,
+            "large buffer copied to the host"
+        );
+    } else {
+        tracing::debug!(
+            start = format_args!("{start:#x}"),
+            len,
+            "buffer copied to the host"
+        );
+    }
+    let mut shadow = Shadow::new(buffer, data, gpu, start, len);
+    shadow.card = card;
+    let shadow = Arc::new(shadow);
+    if shadow.card.is_some() {
+        CARDED.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&shadow));
+    }
+    Some(shadow)
 }
 
 /// Titles also use memory outside any buffer object as GPU memory (
@@ -3145,17 +3397,10 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
     };
     if let Some(shadow) = map.get(&(start, len)) {
         note(shadow);
-        if hot_windows_most() > 0 {
+        if hot_most() > 0 {
             let frame = frame_now();
             let run = warmed(shadow, frame);
-            if hot(shadow, run)
-                && let Some(on_card) = hot_window_card_for(len, frame)
-                && let Some(moved) = window_copy(start, len, Some(on_card))
-            {
-                HOT_WINDOWS[0].fetch_add(1, Ordering::Relaxed);
-                HOT_WINDOWS[1].fetch_add(len, Ordering::Relaxed);
-                tracing::debug!(start = format_args!("{start:#x}"), len, run, "a hot window's copy moves to the card");
-                moved.heat.store(shadow.heat.load(Ordering::Relaxed), Ordering::Relaxed);
+            if let Some(moved) = moved_up(shadow, run, false, frame, |on_card| window_copy(start, len, Some(on_card))) {
                 note(&moved);
                 if let Some(old) = map.insert((start, len), moved.clone()) {
                     // Lists recorded with it hold it; it goes after them.
@@ -3362,12 +3607,22 @@ pub(crate) fn near(va: u64) -> String {
 
 #[cfg(test)]
 mod hot_window_tests {
-    use super::{HOT_FRAMES, TEST_FRAME, TEST_HOT, WINDOW, card_dirty, find_any, host};
+    use super::{HOT_FRAMES, Shadow, TEST_FRAME, TEST_HOT, WINDOW, card_dirty, find_any, host};
+
+    impl Shadow {
+        /// As [`Shadow::gpu_writes`] notes it for the twin, without a list.
+        fn twin_wrote_by_test(&self, from: usize, to: usize) {
+            if let Some(twin) = self.twin() {
+                twin.twin_wrote.lock().unwrap().push((from, to));
+            }
+        }
+    }
     use std::sync::Arc;
 
     /// A window draws ask for frame after frame moves to the card once it
-    /// is hot, and stays there; one a descriptor slot views stays in the
-    /// PC's memory, as does one asked for with a frame missed in between.
+    /// is hot, and stays there; one a descriptor slot views moves too, with
+    /// the old copy kept current as its twin until nothing shows it; one
+    /// asked for with a frame missed in between stays.
     #[test]
     fn a_window_asked_for_frame_after_frame_moves_to_the_card() {
         if host().is_none() {
@@ -3400,17 +3655,92 @@ mod hot_window_tests {
         let dirty = card_dirty(0);
         let ours = dirty.iter().find(|(s, _)| Arc::ptr_eq(s, &moved)).expect("queued for the card");
         assert_eq!(ours.1, [(256, 256 + 4096)]);
-        // A slot views the next window: it stays where it is.
+        // The test holds the old copy, as a list would: kept as the twin
+        // until it lets go.
+        assert!(moved.twin().is_some_and(|t| Arc::ptr_eq(&t, &first)));
+        drop(first);
+        super::let_go_twins();
+        assert!(moved.twin().is_none(), "nothing has it any more");
+        // A slot views the next window: it moves too, and the copy the slot
+        // shows is kept as its twin and refreshed with it.
         let viewed = ask(at + WINDOW, 2000);
-        let _slot = viewed.buffer.clone();
-        for frame in 2001..2000 + 2 * HOT_FRAMES {
-            assert!(!ask(at + WINDOW, frame).carded(), "viewed by a slot, frame {frame}");
+        let slot = viewed.buffer.clone();
+        for frame in 2001..2000 + HOT_FRAMES {
+            assert!(Arc::ptr_eq(&ask(at + WINDOW, frame), &viewed), "not hot yet, frame {frame}");
         }
+        let up = ask(at + WINDOW, 2000 + HOT_FRAMES);
+        assert!(up.carded(), "moved although a slot shows the old copy");
+        assert!(up.replaced(&slot), "the slot's buffer is the replaced copy's");
+        assert!(Arc::ptr_eq(&up.twin().expect("a twin"), &viewed));
+        assert!(Arc::ptr_eq(&viewed.twin().expect("and back"), &up));
+        // The title writes the window; a refresh of either copy brings both
+        // up to date.
+        // SAFETY: our own memory, leaked, inside the window.
+        unsafe { ((up.start + 512) as *mut u8).write_bytes(9, 64) };
+        let from = up.start as usize + 512;
+        up.copy(from, from + 64);
+        // SAFETY: inside both copies' CPU-side mappings.
+        let (a, b) = unsafe {
+            (std::slice::from_raw_parts(up.data.add(512), 64), std::slice::from_raw_parts(viewed.data.add(512), 64))
+        };
+        assert!(a.iter().all(|&x| x == 9) && b.iter().all(|&x| x == 9), "both copies hold the title's bytes");
+        // Shaders write the new copy: the old one takes that range again
+        // once it is back in title memory.
+        up.twin_wrote_by_test(512, 576);
+        assert_eq!(viewed.twin_wrote.lock().unwrap().as_slice(), [(512, 576)]);
+        viewed.update(from, 64);
+        assert!(viewed.twin_wrote.lock().unwrap().is_empty(), "taken again");
+        // While the slot shows it, the twin stays; once nothing does, the
+        // sweep lets it go.
+        super::let_go_twins();
+        assert!(up.twin().is_some(), "the slot still shows it");
+        drop(slot);
+        drop(viewed);
+        super::let_go_twins();
+        assert!(up.twin_old.lock().unwrap().is_none(), "let go");
         // Asked for with a frame missed: the count starts again.
         let gappy = ask(at + 2 * WINDOW, 3000);
         for frame in (3001..3000 + 2 * HOT_FRAMES).filter(|f| f % 4 != 0) {
             assert!(Arc::ptr_eq(&ask(at + 2 * WINDOW, frame), &gappy), "not in a row, frame {frame}");
         }
+        TEST_HOT.with(|h| h.set(false));
+        TEST_FRAME.with(|f| f.set(None));
+    }
+
+    /// A title buffer shaders cannot write, asked for frame after frame,
+    /// moves to the card by the same rule as windows; one made for
+    /// unordered access stays in the PC's memory.
+    #[test]
+    fn a_hot_read_only_buffer_moves_and_a_writable_one_stays() {
+        if host().is_none() {
+            return; // no host GPU here
+        }
+        TEST_HOT.with(|h| h.set(true));
+        let ask = |address: u64, frame: u64| {
+            TEST_FRAME.with(|f| f.set(Some(frame)));
+            super::find(address, 256).expect("a copy")
+        };
+        let (_read_only, at) = crate::resource::tests::title_buffer(1 << 20, 0);
+        let (_writable, wat) = crate::resource::tests::title_buffer(1 << 20, 4);
+        let first = ask(at, 5000);
+        assert!(!first.window && !first.carded(), "a title buffer's copy in the PC's memory");
+        for frame in 5001..5000 + HOT_FRAMES {
+            assert!(Arc::ptr_eq(&ask(at, frame), &first), "not hot yet at {frame}");
+        }
+        let moved = ask(at, 5000 + HOT_FRAMES);
+        assert!(moved.carded(), "moved to the card");
+        assert_eq!((moved.start, moved.len), (at, 1 << 20));
+        assert!(Arc::ptr_eq(&ask(at, 5000 + HOT_FRAMES + 1), &moved));
+        // The test held the old one: kept as a twin until it lets go.
+        assert!(moved.twin().is_some_and(|t| Arc::ptr_eq(&t, &first)));
+        drop(first);
+        super::let_go_twins();
+        assert!(moved.twin().is_none());
+        let writable = ask(wat, 6000);
+        for frame in 6001..6000 + 2 * HOT_FRAMES {
+            assert!(Arc::ptr_eq(&ask(wat, frame), &writable), "shaders may write it: stays, frame {frame}");
+        }
+        assert!(!writable.carded());
         TEST_HOT.with(|h| h.set(false));
         TEST_FRAME.with(|f| f.set(None));
     }

@@ -1630,6 +1630,14 @@ impl HostHeap {
             .is_some_and(|shown| crate::resource::shows_stale(texture, shown))
     }
 
+    /// Whether host slot `index` shows the buffer of the old copy that
+    /// `copy` replaced (`crate::shadow`'s hot copies): it is to be made
+    /// again from `copy` ([`HostHeap::remake`]).
+    pub(crate) fn shows_replaced(&self, index: u32, copy: &crate::shadow::Shadow) -> bool {
+        let kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
+        kept.get(index as usize).and_then(Option::as_ref).is_some_and(|shown| copy.replaced(shown))
+    }
+
     /// Makes slot `index` again from the title's view at `handle`, as if
     /// the title had written it: what it showed is let go once the
     /// submissions running now are done ([`HostHeap::keep`]).
@@ -2961,6 +2969,43 @@ mod tests {
         assert_eq!(windows::core::Interface::as_raw(&shown(&heap)), windows::core::Interface::as_raw(&new));
         assert_eq!(device_removed(), None);
         REMAPPED.lock().unwrap().clear();
+    }
+
+    /// A slot made for a draw from a title buffer's copy shows the replaced
+    /// copy once the copy has moved to the card; made again, it shows the
+    /// copy on the card, and the old one is no longer shown.
+    #[test]
+    fn a_slot_showing_a_copy_that_moved_is_made_again_from_the_card_copy() {
+        let Some(heap) = HostHeap::new(false, 8) else {
+            return; // no host GPU
+        };
+        let (buffer, at) = crate::resource::tests::title_buffer(1 << 20, 0);
+        // A structured view of 256 four-byte elements from the start.
+        let mut record = [0u32; 8];
+        let handle = record.as_mut_ptr() as u64;
+        let desc: [u32; 10] = [0, 1, 0x1688, 0, 0, 0, 256, 4, 0, 0];
+        crate::descriptor::create_srv(std::ptr::null(), buffer, &desc, handle);
+        crate::shadow::test_hot(true, Some(7000));
+        let view = heap.mirror(2, handle, true).expect("made for a draw");
+        let (old, _, _) = buffer_copy(&view).expect("its copy");
+        assert!(!old.carded());
+        let shown = heap.kept.lock().unwrap()[2].clone().expect("the slot holds its buffer");
+        assert_eq!(windows::core::Interface::as_raw(&shown), windows::core::Interface::as_raw(&old.buffer));
+        assert!(!heap.shows_replaced(2, &old));
+        // Asked for in frame after frame (as draws do): it moves.
+        for frame in 7001..=7008 {
+            crate::shadow::test_hot(true, Some(frame));
+            let _ = crate::shadow::find(at, 256);
+        }
+        let (new, _, _) = buffer_copy(&view).expect("its copy now");
+        assert!(new.carded(), "moved to the card");
+        assert!(heap.shows_replaced(2, &new), "the slot shows the replaced copy");
+        assert!(heap.remake(2, handle).is_some());
+        let shown = heap.kept.lock().unwrap()[2].clone().expect("the slot holds a buffer");
+        assert_eq!(windows::core::Interface::as_raw(&shown), windows::core::Interface::as_raw(&new.buffer));
+        assert!(!heap.shows_replaced(2, &new));
+        assert_eq!(device_removed(), None);
+        crate::shadow::test_hot(false, None);
     }
 
     /// The tests that take [`REMAPPED`] and [`OVERFLOWED`], one at a time.
