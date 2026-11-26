@@ -966,6 +966,69 @@ fn late_child() {
     }
     assert_eq!(crate::descriptor::host::device_removed(), None);
     let _ = sent_before;
+    // The textures hold the buffers' bytes as the title left them: eight of
+    // them read back from the card, every row compared.
+    {
+        use windows::Win32::Graphics::Direct3D12::*;
+        use windows::core::Interface;
+        let host = crate::host::host().expect("a host");
+        for i in (0..count).step_by(count / 8) {
+            let texture = textures[i];
+            let image = crate::resource::host_resource(texture).expect("a host texture").clone();
+            let back = host.read_back_buffer(LEN as u64).expect("a read-back buffer");
+            let list = host.new_list().expect("a host list");
+            let before = crate::resource::host_transition(texture, 0x800).map_or(0x800, |(_, before)| before);
+            let rows = D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                Offset: 0,
+                Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                    Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM,
+                    Width: SIDE,
+                    Height: SIDE,
+                    Depth: 1,
+                    RowPitch: SIDE * 4,
+                },
+            };
+            // SAFETY: an open list of ours, live resources.
+            unsafe {
+                if before != 0x800 {
+                    list.list.ResourceBarrier(&[crate::host::transition(
+                        &image,
+                        D3D12_RESOURCE_STATES(before as i32),
+                        D3D12_RESOURCE_STATE_COPY_SOURCE,
+                    )]);
+                }
+                list.list.CopyTextureRegion(
+                    &D3D12_TEXTURE_COPY_LOCATION {
+                        pResource: std::mem::transmute_copy(&back),
+                        Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { PlacedFootprint: rows },
+                    },
+                    0,
+                    0,
+                    0,
+                    &D3D12_TEXTURE_COPY_LOCATION {
+                        pResource: std::mem::transmute_copy(&image),
+                        Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+                    },
+                    None,
+                );
+            }
+            list.close();
+            host.execute(&[&list]);
+            let mut mapped = std::ptr::null_mut();
+            // SAFETY: the copy has run (execute waits); LEN bytes.
+            let got = unsafe {
+                back.Map(0, None, Some(&mut mapped)).expect("mapped");
+                std::slice::from_raw_parts(mapped.cast::<u8>(), LEN)
+            };
+            // SAFETY: the buffer's own memory, LEN bytes.
+            let want = unsafe { std::slice::from_raw_parts(buffers[i].1 as *const u8, LEN) };
+            let wrong = got.iter().zip(want).filter(|(a, b)| a != b).count();
+            assert_eq!(wrong, 0, "texture {i} differs from its buffer in {wrong} bytes");
+            let _ = image.as_raw();
+        }
+    }
     times.sort_by(f64::total_cmp);
     let per = |us: u64| us as f64 / 1e3 / COUNTED as f64;
     if let Some(cpu) = crate::cpuprof::line(COUNTED as f64) {
@@ -1441,4 +1504,37 @@ fn pressure_stress() {
     println!("hot copies on the card after the release: {moved} of {}", buffers.len());
     assert_eq!(moved, buffers.len());
     assert_eq!(crate::descriptor::host::device_removed(), None);
+}
+
+/// Title copies from buffers into textures keep the buffers' bytes in the
+/// textures, read back from the card, with the copies made from the host
+/// copies or from uploads, synchronously, with the late wait or with the
+/// relay, while hot copies move ([`late_child`] in child processes).
+#[test]
+fn texture_copies_in_flight_hold_their_buffers_bytes() {
+    if crate::host::host().is_none() {
+        return; // no host GPU here
+    }
+    let exe = std::env::current_exe().expect("the test binary");
+    let modes: [&[(&str, &str)]; 4] = [
+        &[("VICTORY_LATE_WAIT", "1")],
+        &[("VICTORY_TEXTURE_FROM_COPY", "1")],
+        &[("VICTORY_TEXTURE_FROM_COPY", "1"), ("SIXTH_BENCH_HOT_MB", "1024"), ("VICTORY_LATE_WAIT", "3")],
+        &[("VICTORY_TEXTURE_FROM_COPY", "1"), ("SIXTH_BENCH_HOT_MB", "1024"), ("VICTORY_RELAY", "1")],
+    ];
+    for vars in modes {
+        let mut child = std::process::Command::new(&exe);
+        child
+            .args(["--exact", "flights::late_child", "--ignored", "--nocapture", "--test-threads", "1"])
+            .env("SIXTH_LATE_CHILD", "1");
+        for v in ["VICTORY_LATE_WAIT", "VICTORY_RELAY", "VICTORY_TEXTURE_FROM_COPY", "SIXTH_BENCH_HOT_MB"] {
+            child.env_remove(v);
+        }
+        for (k, v) in vars {
+            child.env(k, v);
+        }
+        let out = child.output().expect("the child ran");
+        let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && text.contains("LATE-ROW"), "{vars:?}: {text}");
+    }
 }
