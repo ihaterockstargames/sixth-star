@@ -47,6 +47,8 @@ mod sysprof;
 mod ledger;
 #[cfg(windows)]
 mod residency;
+#[cfg(all(test, windows))]
+mod flights;
 #[cfg(windows)]
 mod host;
 #[cfg(windows)]

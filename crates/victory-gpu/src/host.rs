@@ -2493,6 +2493,13 @@ const WHY_FENCE: usize = 10;
 /// copy, a fill of upload memory, a texture).
 static LATE_STATS: [std::sync::atomic::AtomicU64; 18] = [const { std::sync::atomic::AtomicU64::new(0) }; 18];
 
+/// Tests: submissions sent without a wait and settles, since the start of
+/// the frame-rate line's count.
+#[cfg(test)]
+pub(crate) fn late_counts() -> (u64, u64) {
+    (LATE_STATS[0].load(Ordering::Relaxed), LATE_STATS[1].load(Ordering::Relaxed))
+}
+
 /// Since the last frame-rate line: the microseconds settles waited for the
 /// card, by why they settled (the `WHY_` places).
 static LATE_WAITED: [std::sync::atomic::AtomicU64; 11] = [const { std::sync::atomic::AtomicU64::new(0) }; 11];
