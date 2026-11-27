@@ -340,6 +340,16 @@ $OutDir = (Resolve-Path $OutDir).Path
 $wrapper = Join-Path $configDir 'run.config.ab.bat'
 Write-Host "[ab] settings  $Config (not changed)"
 Write-Host "[ab] logs      $OutDir"
+# The maintainer's own launcher beside the settings file, if there is one:
+# it sets local defaults before it calls this repository's run.bat (the
+# skip list of shaders that never finish compiling on that driver, the
+# caches on another drive). Run without it, every configuration started
+# differently from the maintainer's own runs.
+$localRun = Join-Path $configDir 'run.bat'
+if ((Test-Path $localRun) -and ((Resolve-Path $localRun).Path -ne (Resolve-Path $runBat).Path)) {
+    $runBat = (Resolve-Path $localRun).Path
+}
+Write-Host "[ab] launcher  $runBat"
 foreach ($pair in @(@('CACHE_DIR', 'victory-cache'), @('DATA_DIR', 'victory-data'))) {
     $folder = Join-Path $configDir $pair[1]
     if (Test-Path $folder) { Write-Host "[ab] $($pair[0].ToLower().PadRight(9)) $folder (unless the settings name another)" }
