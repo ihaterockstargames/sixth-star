@@ -5801,9 +5801,9 @@ impl HostList {
     fn run_deferred(&self, batch: &mut Batch) {
         #[cfg(feature = "diagnostics")]
         use crate::copystat::{C, add};
-        // With `VICTORY_WIDE_FILLS=1` (or `VICTORY_WIDE_REFRESH=1`): fills
-        // in a row, done together on several threads before the next step
-        // of another kind.
+        // Fills in a row, done together on several threads before the next
+        // step of another kind (the default; `VICTORY_WIDE_FILLS=0` turns
+        // it off).
         let mut fills = Fills::default();
         let wide = wide_fills();
         for step in &self.deferred().copies {
@@ -5895,8 +5895,7 @@ impl HostList {
 }
 
 /// A list's fills in a row (title memory into the list's own upload
-/// memory), done together (`VICTORY_WIDE_FILLS=1`, or with
-/// `VICTORY_WIDE_REFRESH=1`).
+/// memory), done together (the default; `VICTORY_WIDE_FILLS=0` off).
 ///
 /// Each texture copy from a title buffer is a fill of its own: the
 /// stand-in title's sixteen 3 MB copies a frame were sixteen copies one
@@ -5982,21 +5981,20 @@ fn wide_refresh() -> bool {
 
 /// Whether a list's fills in a row run on several threads ([`Fills`]).
 ///
-/// Its own switch, `VICTORY_WIDE_FILLS`, so that the fills can be measured
-/// (and made a default) apart from the refreshes: `1` on, `0` off, unset
-/// follows `VICTORY_WIDE_REFRESH`. Off by default.
+/// On by default since 2026-11-27, on the stand-in title's measurements
+/// (CPU preparing, `baseline` against `VICTORY_WIDE_FILLS=1`: 16 copies of
+/// 3 MB 3.8 -> 2.6 and 3.9 -> 2.6 ms, 8 copies 2.0 -> 1.4 ms, 2 copies
+/// 0.5 -> 0.4 ms; the same GPU work and picture). Fills of less than
+/// 2 MiB in all stay on the submitting thread. `VICTORY_WIDE_FILLS=0`
+/// turns it off.
 fn wide_fills() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| fills_switch(std::env::var_os("VICTORY_WIDE_FILLS").as_deref(), wide_refresh()))
+    *ON.get_or_init(|| fills_switch(std::env::var_os("VICTORY_WIDE_FILLS").as_deref()))
 }
 
-/// `VICTORY_WIDE_FILLS`'s value, with what `VICTORY_WIDE_REFRESH` says.
-fn fills_switch(value: Option<&std::ffi::OsStr>, wide_refresh: bool) -> bool {
-    match value.and_then(|v| v.to_str()) {
-        Some("1") => true,
-        Some("0") => false,
-        _ => wide_refresh,
-    }
+/// `VICTORY_WIDE_FILLS`'s value: only `0` turns the wide fills off.
+fn fills_switch(value: Option<&std::ffi::OsStr>) -> bool {
+    value.and_then(|v| v.to_str()) != Some("0")
 }
 
 /// A submission's refreshes not done yet, merged per buffer copy into the
@@ -7805,13 +7803,11 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
     use std::sync::Arc;
 
     #[test]
-    fn the_fills_switch_follows_wide_refresh_unless_set() {
-        assert!(!fills_switch(None, false));
-        assert!(fills_switch(None, true));
-        assert!(fills_switch(Some(OsStr::new("1")), false));
-        assert!(!fills_switch(Some(OsStr::new("0")), true));
-        assert!(fills_switch(Some(OsStr::new("yes")), true));
-        assert!(!fills_switch(Some(OsStr::new("yes")), false));
+    fn the_wide_fills_are_on_unless_switched_off() {
+        assert!(fills_switch(None));
+        assert!(fills_switch(Some(OsStr::new("1"))));
+        assert!(fills_switch(Some(OsStr::new("yes"))));
+        assert!(!fills_switch(Some(OsStr::new("0"))));
     }
 
     #[test]

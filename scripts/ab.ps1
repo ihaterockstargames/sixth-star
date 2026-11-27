@@ -26,7 +26,9 @@
 #                  on its own thread; passes the flights tests on this machine)
 #   bestlate       best with VICTORY_LATE_WAIT=3
 #   wide           VICTORY_WIDE_REFRESH=1 (refreshes on several threads)
-#   fills          VICTORY_WIDE_FILLS=1 (a list's fills on several threads, not the refreshes)
+#   fills          VICTORY_WIDE_FILLS=1 (a list's fills on several threads; the default
+#                  since 2026-11-27)
+#   nofills        VICTORY_WIDE_FILLS=0 (fills one after the other, as before)
 #   keepsnap       VICTORY_KEEP_SNAPSHOTS=1
 #   resid          VICTORY_RESIDENCY=1 (textures that find no room on the card go
 #                  to the PC's memory; the default from 009dd7a until 2026-11-27,
@@ -100,6 +102,7 @@ function Get-Overrides([string]$name) {
         '^bestlate$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_TEXTURE_FROM_COPY = '1'; VICTORY_LATE_WAIT = '3' } }
         '^wide$' { return [ordered]@{ VICTORY_WIDE_REFRESH = '1' } }
         '^fills$' { return [ordered]@{ VICTORY_WIDE_FILLS = '1' } }
+        '^nofills$' { return [ordered]@{ VICTORY_WIDE_FILLS = '0' } }
         '^keepsnap$' { return [ordered]@{ VICTORY_KEEP_SNAPSHOTS = '1' } }
         '^relay$' { return [ordered]@{ VICTORY_RELAY = '1' } }
         '^late(\d)$' { return [ordered]@{ VICTORY_LATE_WAIT = $Matches[1] } }
