@@ -5801,7 +5801,14 @@ impl HostList {
     fn run_deferred(&self, batch: &mut Batch) {
         #[cfg(feature = "diagnostics")]
         use crate::copystat::{C, add};
+        // With `VICTORY_WIDE_REFRESH=1`: fills in a row, done together on
+        // several threads before the next step of another kind.
+        let mut fills = Fills::default();
+        let wide = wide_refresh();
         for step in &self.deferred().copies {
+            if !matches!(step, Step::Fill(..)) {
+                fills.run();
+            }
             let started = std::time::Instant::now();
             let copied = match step {
                 &Step::Copy(dst, src, len) => {
@@ -5821,6 +5828,10 @@ impl HostList {
                     {
                         add(C::Copies, 1);
                         add(C::CopyBytes, len as u64);
+                    }
+                    if wide {
+                        fills.add(dst, src, len);
+                        continue;
                     }
                     copy_mapped(dst as *mut u8, src as *const u8, len, false);
                     len
@@ -5878,6 +5889,75 @@ impl HostList {
             PREPARING[0].fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
             PREPARING[1].fetch_add(copied as u64, Ordering::Relaxed);
         }
+        fills.run();
+    }
+}
+
+/// A list's fills in a row (title memory into the list's own upload
+/// memory), done together (`VICTORY_WIDE_REFRESH=1`).
+///
+/// Each texture copy from a title buffer is a fill of its own: the
+/// stand-in title's sixteen 3 MB copies a frame were sixteen copies one
+/// after the other on the submitting thread, at the speed of one thread.
+/// A fill reads title memory and writes memory no other step writes, so
+/// fills in a row may run in any order and at once; they are done before
+/// the next step of another kind (which may write title memory), and
+/// before a fill whose destination overlaps one still pending.
+#[derive(Default)]
+struct Fills {
+    /// (destination, source, bytes).
+    pending: Vec<(usize, usize, usize)>,
+}
+
+impl Fills {
+    /// About this many bytes to a thread's piece of work.
+    const PIECE: usize = 1 << 20;
+
+    fn add(&mut self, dst: usize, src: usize, len: usize) {
+        if self.pending.iter().any(|&(d, _, l)| d < dst + len && dst < d + l) {
+            self.run();
+        }
+        self.pending.push((dst, src, len));
+    }
+
+    /// The pending fills cut into pieces of at most `piece` bytes.
+    fn pieces(fills: &[(usize, usize, usize)], piece: usize) -> Vec<(usize, usize, usize)> {
+        let mut pieces = Vec::new();
+        for &(dst, src, len) in fills {
+            let mut at = 0;
+            while at < len {
+                let n = piece.min(len - at);
+                pieces.push((dst + at, src + at, n));
+                at += n;
+            }
+        }
+        pieces
+    }
+
+    fn run(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let started = std::time::Instant::now();
+        let fills = std::mem::take(&mut self.pending);
+        let bytes: usize = fills.iter().map(|f| f.2).sum();
+        if bytes < 2 * Self::PIECE {
+            for (dst, src, len) in fills {
+                copy_mapped(dst as *mut u8, src as *const u8, len, false);
+            }
+        } else {
+            let jobs: Vec<Box<dyn FnOnce() + Send>> = Self::pieces(&fills, Self::PIECE)
+                .into_iter()
+                .map(|(dst, src, len)| {
+                    Box::new(move || copy_mapped(dst as *mut u8, src as *const u8, len, false))
+                        as Box<dyn FnOnce() + Send>
+                })
+                .collect();
+            crate::shadow::wide_run(jobs);
+        }
+        // The time it took, not the threads' sum.
+        PREPARING[0].fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+        PREPARING[1].fetch_add(bytes as u64, Ordering::Relaxed);
     }
 }
 
@@ -7699,8 +7779,52 @@ mod spare {
 
 #[cfg(test)]
 mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at the top of this file
-    use super::Batch;
+    use super::{Batch, Fills};
     use std::sync::Arc;
+
+    #[test]
+    fn fills_are_cut_into_pieces_that_cover_them() {
+        let fills = [(1000, 50_000, 2500), (9000, 70_000, 1000), (20_000, 90_000, 0)];
+        let pieces = Fills::pieces(&fills, 1000);
+        assert_eq!(
+            pieces,
+            vec![
+                (1000, 50_000, 1000),
+                (2000, 51_000, 1000),
+                (3000, 52_000, 500),
+                (9000, 70_000, 1000),
+            ]
+        );
+    }
+
+    /// Fills done together copy what fills one by one copy: many, large
+    /// enough to go wide, one of them small, two to the same destination
+    /// (the later must win).
+    #[test]
+    fn wide_fills_copy_every_byte() {
+        let sizes = [3 << 20, 1 << 20, 100, 5 << 20, 3 << 20];
+        let sources: Vec<Vec<u8>> = sizes
+            .iter()
+            .enumerate()
+            .map(|(n, &len)| (0..len).map(|i| (i * 7 + n * 13) as u8).collect())
+            .collect();
+        let mut targets: Vec<Vec<u8>> = sizes.iter().map(|&len| vec![0u8; len]).collect();
+        let mut again = vec![0u8; sizes[0]];
+        let mut fills = Fills::default();
+        for (src, dst) in sources.iter().zip(targets.iter_mut()) {
+            fills.add(dst.as_mut_ptr() as usize, src.as_ptr() as usize, src.len());
+        }
+        // The same destination as the first fill, from another source.
+        fills.add(targets[0].as_mut_ptr() as usize, sources[3].as_ptr() as usize, sizes[0]);
+        fills.add(again.as_mut_ptr() as usize, sources[4].as_ptr() as usize, sizes[0]);
+        fills.run();
+        assert!(fills.pending.is_empty());
+        assert_eq!(targets[0], sources[3][..sizes[0]]);
+        for n in 1..sizes.len() {
+            assert_eq!(targets[n], sources[n], "fill {n}");
+        }
+        assert_eq!(again, sources[4]);
+    }
 
     #[test]
     fn a_texture_is_checked_once_per_submission() {
