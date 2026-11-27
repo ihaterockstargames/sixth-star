@@ -208,7 +208,9 @@ mod tests {
         let mut second = 0;
         assert_eq!(wait(null, 0, 1_000, std::ptr::null(), 0, &mut second), S_OK);
         assert!(second > first);
-        assert!(before.elapsed() <= Duration::from_millis(50));
+        // On its tick, 2 ms away, not at its 1 s time-out. The bound is
+        // loose: a busy machine can hold the thread a while.
+        assert!(before.elapsed() < Duration::from_millis(500));
         assert_eq!(wait(null, 0, 0, std::ptr::null(), 0, &mut second), TIMEOUT);
         // Tokens count frames, a frame started early on a time-out too.
         let mut early = 0;
@@ -224,23 +226,47 @@ mod tests {
 
         // The title's loop (the clock is global, so in the same test): an
         // origin poll that times out (and starts the frame), then a
-        // blocking flip wait. Each flip takes its own tick.
+        // blocking flip wait. Each flip takes its own tick: the next one,
+        // or, when the loop is late, the latest tick that has passed, never
+        // an older one. A busy machine can hold the loop for ticks at any
+        // point (CI's runner did, for two: flips 3, 4, 5, 7 on 2026-11-27),
+        // so each flip is checked against the ticks passed around its wait,
+        // and one turn is late on purpose.
         const FLIP: u32 = 2;
         assert_eq!(set_interval(null, null, 5_000, 3, 0), S_OK);
         let mut token = 0;
-        let flips: Vec<u64> = (0..4)
-            .map(|_| {
-                let _ = wait(null, 0, 0, std::ptr::null(), TOKEN_ON_TIMEOUT, &mut token);
-                assert_eq!(
-                    wait(null, FLIP, u32::MAX, std::ptr::null(), 0, &mut token),
-                    S_OK
-                );
-                LAST[2].load(Ordering::Relaxed)
-            })
-            .collect();
-        assert!(flips.windows(2).all(|w| w[1] == w[0] + 1), "{flips:?}");
+        let mut last = LAST[2].load(Ordering::Relaxed);
+        let mut flips = Vec::new();
+        for turn in 0..4 {
+            if turn == 2 {
+                // Two and a half ticks late.
+                std::thread::sleep(Duration::from_micros(12_500));
+            }
+            let _ = wait(null, 0, 0, std::ptr::null(), TOKEN_ON_TIMEOUT, &mut token);
+            let passed = passed_tick();
+            assert_eq!(
+                wait(null, FLIP, u32::MAX, std::ptr::null(), 0, &mut token),
+                S_OK
+            );
+            let flip = LAST[2].load(Ordering::Relaxed);
+            assert!(
+                flip > last && flip >= passed && flip <= passed_tick(),
+                "{flips:?}, then {flip} (tick {passed} had passed)"
+            );
+            flips.push(flip);
+            last = flip;
+        }
+        // The late turn skipped the ticks it slept through.
+        assert!(flips[2] >= flips[1] + 2, "{flips:?}");
         // Even when a flip wait begins on the tick another just ended on.
         let (tick, _) = next_tick(FLIP);
         assert!(tick > flips[3]);
+    }
+
+    /// The latest tick the clock has passed.
+    fn passed_tick() -> u64 {
+        let clock = clock();
+        let c = clock.as_ref().expect("an interval is set");
+        c.first + (c.start.elapsed().as_nanos() / c.interval.as_nanos().max(1)) as u64
     }
 }
