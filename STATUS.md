@@ -151,6 +151,43 @@ again that way).
   physical memory (the frame line shows that since `e847242`). The scene may
   also have been heavier than on 2026-11-26.
 
+## Automated runs of the runtime (stand-in title, no game)
+
+Since `a6ab611`, `autotest.bat` tests the runtime without anyone at the
+machine. Each cycle builds, runs the workspace's tests and the synthetic
+benchmarks, then runs a stand-in title through the real `sixth-star.exe` in
+six configurations. The stand-in is `tests\fixtures\test-title`, written
+for this project: it uses no game code or data. Every run is watched for
+hangs and crashes, and every saved frame is checked pixel by pixel against
+the known picture.
+
+These runs are **not** measurements of the test title. They show that the
+runtime's path works end to end (loader, imports, the console's graphics
+interfaces, title memory, copies, present), and what each configuration
+costs on it.
+
+Cycle 2, 2026-11-27, `d8eb853` plus the runner (committed as `a6ab611`),
+RTX 3070:
+
+- Build ok. Tests: 669 passed, 0 failed, 21 ignored.
+- `synthetic_ab` (150 frames), every byte right:
+  - game-shaped frame: `baseline` 119.9 ms, `best` 18.1 ms, `bestlate` 18.4 ms, `hot1024` 78.2 ms, `cardbuf1` 55.0 ms;
+  - streaming: `baseline` 65.3 ms, `bestlate` 13.2 ms.
+- The stand-in title, 45 s per configuration, 8 buffers of 3 MB rewritten and copied each frame. Each run took about 2,690 frames, ended with exit code 0 and needed no restart, and 4 frames of each were checked and right. The window is held to 60 Hz, so the runtime's own costs are what tell the configurations apart:
+
+| Configuration | CPU preparing, ms per frame | GPU work, ms per frame (timestamps) | Picture |
+|---|---|---|---|
+| `baseline` | 2.2 | 1.0 | right |
+| `resid` | 2.2 | 1.0 | right |
+| `texcopy` | 2.7 | 1.0 | right |
+| `hot1024` | 2.1 | 1.0 | right |
+| `cardbuf1` | 2.1 | 1.0 | right |
+| `best` | 2.7 | 1.0 | right |
+
+On this workload, copying textures from the buffers' host copies
+(`texcopy`, part of `best`) costs about 0.5 ms more CPU per frame than
+the default.
+
 ## Where the frame time goes (2026-11-26, gameplay)
 
 Gameplay, measured by the maintainer from the runner's frame line on 2026-11-26:
@@ -200,6 +237,7 @@ Task Manager figures were not taken for this run.
 | 2026-11-26 | current main | ~30 FPS loading/menus, ~5 FPS in-game | first public record; user-reported, approximate; 1080p, ReBAR on |
 | 2026-11-26 | current main (build not recorded) | ran without a crash | latest session, observed by the maintainer; length not recorded |
 | 2026-11-26 | current main (build not recorded) | gameplay 4.59 FPS (217.9 ms/frame) | measured by the maintainer from the runner's frame line on 2026-11-26: 82.3 ms CPU preparing, 86.6 ms waiting for the GPU, 44.7 ms copying back, in series |
+| 2026-11-27 | `a6ab611` | autonomous test runner (`autotest.bat`) and a stand-in title through the runtime: 6 of 6 configurations ran and showed the right picture; 669 tests passed | automated, on this machine; not the test title |
 | 2026-11-27 | `e847242` | texture fallback off by default again; the PC's memory on the frame line; `ab.bat` counts gameplay frame lines only | not measured on the title yet |
 | 2026-11-27 | `b5efb43` | stability run (`best` switches): ended by itself after a session of about 6 min (exit code 1), gameplay ~0.2 FPS | from the runner's lines; no error, device removal or panic logged; seen as a crash by the maintainer |
 | 2026-11-27 | `b5efb43` | gameplay ~0.7 FPS (median 1,438.3 ms/frame) with the defaults (fallback on); ~0.9 FPS (1,076.4 ms/frame) with `VICTORY_TEXTURE_FROM_COPY=1` | measured by the maintainer with `ab.bat` (gameplay frame lines only, from 120 s on, one run each); slower than 2026-11-26; no errors, device removals or panics; sometimes missing textures (user-reported) |
