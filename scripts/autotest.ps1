@@ -345,7 +345,10 @@ function Write-CycleReport($cycle, [string]$dir) {
     $o.Add("# Sixth Star autotest, cycle $($cycle.cycle)")
     $o.Add('')
     $b = $cycle.results.build
-    $o.Add("Started $($cycle.started), finished $(Get-Date -Format 'yyyy-MM-dd HH:mm'). Commit $(if ($b) { $b.commit } else { '?' })$(if ($b -and $b.dirty) { ' (with changes not committed)' }). Machine: $((Get-CimInstance Win32_VideoController | Select-Object -First 1).Name); $((Get-CimInstance Win32_Processor | Select-Object -First 1).Name).")
+    # Without a build stage this cycle, the repository as it is now.
+    $commit = if ($b) { $b.commit } else { (& git -C $repo rev-parse --short HEAD 2>$null) }
+    $dirty = if ($b) { $b.dirty } else { [bool](& git -C $repo status --porcelain --untracked-files=no 2>$null) }
+    $o.Add("Started $($cycle.started), finished $(Get-Date -Format 'yyyy-MM-dd HH:mm'). Commit $commit$(if ($dirty) { ' (with changes not committed)' })$(if (-not $b) { ', binaries from the last build' }). Machine: $((Get-CimInstance Win32_VideoController | Select-Object -First 1).Name); $((Get-CimInstance Win32_Processor | Select-Object -First 1).Name).")
     $o.Add('')
     $o.Add('The title runs are of the stand-in title from tests\fixtures\test-title (written for this project; no game), through the real sixth-star.exe with frame capture. Its picture is known, so every saved frame is checked pixel by pixel.')
     $o.Add('')
