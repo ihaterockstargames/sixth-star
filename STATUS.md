@@ -93,6 +93,11 @@ minutes or more without a crash; that has not been reached or measured.
   by page, instead of filling a fresh upload buffer from title memory with
   every byte, every time. Part of `ab.bat`'s `best`. Measured once on the
   title on 2026-11-27 (see the A/B below).
+- Wide fills (since `ae1ceaf`, **default on**): a command list's texture
+  copies from title buffers in a row are done on several threads, in 1 MB
+  pieces, before the next step of another kind. `VICTORY_WIDE_FILLS=0`
+  turns it off. Measured only on the stand-in title (see "Automated runs");
+  not measured on the test title yet.
 - Copy-back noting (since `bb57383`, default on): pages a copy-back wrote
   whole are no longer copied back into the same copy at the next refresh.
   `VICTORY_BACK_NOTE=0` turns it off.
@@ -206,6 +211,27 @@ Cycles 4 to 8, 2026-11-27 (night runs):
   The switch stays **off by default**: it has not been measured on the
   test title.
 
+Cycles 9 to 17, 2026-11-27 (night run):
+
+- Cycle 9 (`5249822`): all green, 672 tests passed.
+- `6334ca1`: the fills got a switch of their own, `VICTORY_WIDE_FILLS`
+  (`ab.bat` configurations `fills` and `nofills`). `baseline` against
+  `fills`, CPU preparing in ms, stand-in title:
+
+| Buffers of 3 MB copied a frame | `baseline` | `fills` | Picture |
+|---|---|---|---|
+| 16 (two runs) | 3.8 / 3.9 | 2.6 / 2.6 | right |
+| 8 | 2.0 | 1.4 | right |
+| 2 | 0.5 | 0.4 | right |
+
+- `ae1ceaf`: **wide fills are on by default** (`VICTORY_WIDE_FILLS=0`
+  turns them off). Cycle 15 (full, 8 buffers): all green, 673 tests
+  passed, every synthetic byte right, 6 of 6 configurations with the right
+  picture; `baseline` CPU preparing 2.2 -> 1.4 ms, GPU work 1.0 ms
+  unchanged. Then the new default against `nofills`: 8 buffers 1.4 against
+  2.1 ms, 16 buffers 2.7 against 4.2 ms. Fills of less than 2 MiB in all
+  stay on the submitting thread. Not measured on the test title yet.
+
 ## Where the frame time goes (2026-11-26, gameplay)
 
 Gameplay, measured by the maintainer from the runner's frame line on 2026-11-26:
@@ -257,6 +283,7 @@ Task Manager figures were not taken for this run.
 | 2026-11-26 | current main (build not recorded) | gameplay 4.59 FPS (217.9 ms/frame) | measured by the maintainer from the runner's frame line on 2026-11-26: 82.3 ms CPU preparing, 86.6 ms waiting for the GPU, 44.7 ms copying back, in series |
 | 2026-11-27 | `a6ab611` | autonomous test runner (`autotest.bat`) and a stand-in title through the runtime: 6 of 6 configurations ran and showed the right picture; 669 tests passed | automated, on this machine; not the test title |
 | 2026-11-27 | `6133e9d` | stand-in title, 16 copies: CPU preparing 4.2 -> 2.7 ms with `VICTORY_WIDE_REFRESH=1` (fills on several threads); default unchanged; a flaky test fixed (`0875a24`) | automated night run, on this machine; not the test title |
+| 2026-11-27 | `ae1ceaf` | wide fills on by default (`VICTORY_WIDE_FILLS=0` off): stand-in title, 8 copies, CPU preparing 2.2 -> 1.4 ms; 16 copies 4.2 -> 2.7 ms; same GPU work and picture; 673 tests passed | automated night run, on this machine; not the test title |
 | 2026-11-27 | `e847242` | texture fallback off by default again; the PC's memory on the frame line; `ab.bat` counts gameplay frame lines only | not measured on the title yet |
 | 2026-11-27 | `b5efb43` | stability run (`best` switches): ended by itself after a session of about 6 min (exit code 1), gameplay ~0.2 FPS | from the runner's lines; no error, device removal or panic logged; seen as a crash by the maintainer |
 | 2026-11-27 | `b5efb43` | gameplay ~0.7 FPS (median 1,438.3 ms/frame) with the defaults (fallback on); ~0.9 FPS (1,076.4 ms/frame) with `VICTORY_TEXTURE_FROM_COPY=1` | measured by the maintainer with `ab.bat` (gameplay frame lines only, from 120 s on, one run each); slower than 2026-11-26; no errors, device removals or panics; sometimes missing textures (user-reported) |
