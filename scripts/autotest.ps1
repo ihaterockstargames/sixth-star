@@ -41,8 +41,10 @@ param(
     [string[]]$Stages = @('build', 'tests', 'bench', 'title', 'compare'),
     # The configurations of the title runs (ab.ps1's names). A named one
     # (`name:VAR=v`) may set TEST_TITLE_COPIES: copies16 is the default
-    # settings with twice the buffers, where costs per byte show.
-    [string[]]$Configs = @('baseline', 'resid', 'texcopy', 'hot1024', 'cardbuf1', 'best', 'copies16:TEST_TITLE_COPIES=16'),
+    # settings with twice the buffers, where costs per byte show. It may
+    # also set TEST_TITLE_DIRTY (percent of each buffer rewritten after the
+    # first frame), e.g. `texdirty10:VICTORY_TEXTURE_FROM_COPY=1;TEST_TITLE_DIRTY=10`.
+    [string[]]$Configs = @('baseline', 'resid', 'texcopy', 'hot1024', 'cardbuf1', 'best', 'copies16:TEST_TITLE_COPIES=16', 'texdirty10:VICTORY_TEXTURE_FROM_COPY=1;TEST_TITLE_DIRTY=10'),
     # How long each title run lasts.
     [int]$TitleSeconds = 45,
     # Buffers the stand-in title rewrites and copies each frame.
@@ -223,6 +225,8 @@ function Invoke-Title([string]$config, [string]$dir) {
         $vars = @{
             NO_COLOR = '1'; VICTORY_CACHE_DIR = (Join-Path $Root 'cache'); VICTORY_DATA_DIR = (Join-Path $Root 'data')
             VICTORY_CAPTURE = (Join-Path $run 'frames'); TEST_TITLE_SECONDS = "$TitleSeconds"; TEST_TITLE_COPIES = "$TitleCopies"
+            # Whole buffers rewritten unless a configuration sets it.
+            TEST_TITLE_DIRTY = $null
         }
         foreach ($s in $switches) { $vars[$s] = $null }
         foreach ($k in $over.Keys) { $vars[$k] = "$($over[$k])" }

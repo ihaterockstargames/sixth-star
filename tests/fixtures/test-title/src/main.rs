@@ -21,9 +21,14 @@
 //!
 //! Settings, from the environment: `TEST_TITLE_SECONDS` (how long to run;
 //! default 30), `TEST_TITLE_FRAMES` (stop after this many frames; default
-//! none) and `TEST_TITLE_COPIES` (buffers rewritten and copied into the
+//! none), `TEST_TITLE_COPIES` (buffers rewritten and copied into the
 //! target each frame, 1 to 32; default 1: more load on the runtime's paths
-//! for title memory than the 60 Hz present hides).
+//! for title memory than the 60 Hz present hides) and `TEST_TITLE_DIRTY`
+//! (the percentage of each buffer's rows rewritten after the first frame,
+//! 1 to 100; default 100. The rows are the buffer's last ones, so the
+//! moving bar is always among them; the rest keep last frame's bytes, which
+//! are the same, so the picture does not change: a measure of whether the
+//! runtime brings only what changed up to date).
 
 #![no_std]
 #![no_main]
@@ -394,10 +399,11 @@ fn rgba(c: [u8; 3]) -> u32 {
     u32::from(c[0]) | (u32::from(c[1]) << 8) | (u32::from(c[2]) << 16) | 0xff00_0000
 }
 
-/// Writes frame `frame`'s copied part into `data` (`BUFFER_BYTES` bytes).
-fn fill(data: *mut u8, frame: u64) {
+/// Writes frame `frame`'s copied part into `data` (`BUFFER_BYTES` bytes),
+/// from row `first` to the end.
+fn fill(data: *mut u8, frame: u64, first: u32) {
     let bar = ((frame * 16) % u64::from(WIDTH)) as u32;
-    for y in 0..COPIED {
+    for y in first..COPIED {
         // SAFETY: row `y` of the buffer, inside its `BUFFER_BYTES`.
         let row = unsafe { data.add((y * PITCH) as usize).cast::<u32>() };
         let strip = y >= COPIED - STRIP;
@@ -453,10 +459,13 @@ fn run() -> Result<(), u32> {
     let seconds = setting(b"TEST_TITLE_SECONDS\0", 30);
     let max_frames = setting(b"TEST_TITLE_FRAMES\0", u64::MAX);
     let copies = setting(b"TEST_TITLE_COPIES\0", 1).clamp(1, MAX_COPIES as u64) as usize;
+    let dirty = setting(b"TEST_TITLE_DIRTY\0", 100).clamp(1, 100) as u32;
+    // The rows rewritten after the first frame: at least the bar's strip.
+    let dirty_rows = (COPIED * dirty).div_ceil(100).max(STRIP);
     let mut frequency = 0;
     // SAFETY: fills our value.
     unsafe { QueryPerformanceFrequency(&mut frequency) };
-    Line::new().text(b"TEST-TITLE start seconds=").number(seconds).text(b" copies=").number(copies as u64).end();
+    Line::new().text(b"TEST-TITLE start seconds=").number(seconds).text(b" copies=").number(copies as u64).text(b" dirty=").number(u64::from(dirty)).end();
 
     let null: This = core::ptr::null_mut();
     // The device: the interface version the runtime checks, the rest zero.
@@ -583,8 +592,9 @@ fn run() -> Result<(), u32> {
         while frame < max_frames && now(frequency) < deadline {
             let t0 = now(frequency);
             frame += 1;
+            let first = if frame == 1 { 0 } else { COPIED - dirty_rows };
             for d in &data[..copies] {
-                fill(*d, frame);
+                fill(*d, frame, first);
             }
             check(reset_allocator(allocator), Step::AllocatorReset)?;
             check(reset(list, allocator, null), Step::ListReset)?;
