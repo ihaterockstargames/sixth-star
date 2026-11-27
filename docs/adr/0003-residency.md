@@ -124,4 +124,30 @@ The flights tests (`a7faf52`) pass in all six modes on this machine. A later syn
 
 - **Before any default changes:** the frame line's `host memory alive`, `residency:` and `INCOMPLETE FRAMES` lines from the maintainer's run.
 - **Hot copies and card buffers:** `VICTORY_HOT_WINDOWS_MB` and `VICTORY_CARD_BUFFERS_MIN_MB=1` become defaults only after the maintainer's A/B (`ab.bat`: `baseline`, `best`, `hot1024`, `cardbuf1`, same scene), comparing `ms/frame`, `on the GPU`, `copying back`, `INCOMPLETE FRAMES`, errors and the picture.
-- **Fallback:** `VICTORY_RESIDENCY=0` restores the inherited rule (no texture made past nine tenths of the budget, none given up early, none in the PC's memory) for an A/B. A missing texture is a correctness bug, so the fallback stays the default unless it causes worse ones.
+- **Fallback:** it caused worse ones, so since `e847242` (2026-11-27) the inherited rule is the default again and `VICTORY_RESIDENCY=1` turns the fallback on (see §7).
+
+## 7. The fallback on a title, and back off by default (2026-11-27)
+
+**Measured on the title** by the maintainer with `ab.bat` on 2026-11-27 (`b5efb43`, fallback on by default, RTX 3070, 1080p). Median of the gameplay frame lines (at least 200 draws per frame, from 120 s on), one run each:
+
+| | 2026-11-26, before `009dd7a` (no fallback) | 2026-11-27, defaults (fallback on) |
+|---|---|---|
+| Frame | 217.9 ms (4.59 FPS) | 1,438.3 ms (0.70 FPS) |
+| CPU preparing | 82.3 ms | 370.8 ms |
+| On the GPU | 86.6 ms | 263.7 ms (the title's own passes 224.0 ms) |
+| Copying back | 44.7 ms | 286.3 ms |
+| Textures in the PC's memory | none | 16,539 (6,269 MiB) |
+| Process cores busy | not recorded | 1.23 of 16 |
+
+The two runs are not the same scene or build, so this is not an A/B; but every part of the frame grew several times, with gigabytes of textures in the PC's memory and the card past its target.
+
+**Measured on this machine, synthetic** (`flights::pcie_contention_bench`, 2026-11-27): the GPU reads the PC's memory at 25.2 GB/s against 403 GB/s on the card (16x slower), so a pass that samples textures there takes many times longer. While it does, the CPU's own copy rate (four threads) falls from 26.8 to 23.0 GB/s (-14%); a GPU reading the card does not slow it (+1%). Contention explains the GPU's part, and at most a seventh of the CPU's; the CPU's growth (several times, at about one busy core) looks more like a system short of physical memory, which the frame line did not show then.
+
+**Decisions:**
+
+- The fallback is **off by default** again (`crate::residency::on`): the default returns to the rule measured at 4.59 FPS. `VICTORY_RESIDENCY=1` turns it on (`ab.bat` configuration `resid`).
+- With it on, a texture goes to the PC's memory only while 4 GiB of physical memory stay free (`Policy::ram_reserve`, `Refusal::RamLow`): the shared-memory budget the system reports is half of all the PC's memory, not what is free.
+- The frame line now carries the PC's memory (in use, free, the system's commit and limit, the process's commit, working set and page faults per second), and the session line the lowest free memory seen, so the next run shows whether the system pages.
+- `ab.bat` counts only gameplay frame lines (`-MinDraws`, default 200): the menus' 30 FPS no longer mixes into a configuration's figure.
+
+**Next:** the maintainer's A/B `baseline` against `resid` on the same scene, with the new memory figures. A fallback that pays needs to place only textures the GPU rarely reads, which needs to know which slots draws read; that is not measured yet.
