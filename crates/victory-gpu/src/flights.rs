@@ -610,6 +610,7 @@ fn frame_bench() {
             "VICTORY_CARD_BUFFERS_MIN_MB",
             "VICTORY_CARD_BUFFERS_MB",
             "VICTORY_WIDE_REFRESH",
+            "VICTORY_WIDE_FILLS",
             "VICTORY_WIDE_BACK",
             "VICTORY_KEEP_SNAPSHOTS",
             "SIXTH_BENCH_HOT_MB",
@@ -1710,7 +1711,7 @@ const AB_CONFIGS: [(&str, &[(&str, &str)]); 5] = [
 ];
 
 /// Every switch a configuration may set, cleared for the others.
-const AB_SWITCHES: [&str; 12] = [
+const AB_SWITCHES: [&str; 13] = [
     "VICTORY_CARD_BUFFERS_MIN_MB",
     "VICTORY_CARD_BUFFERS_MB",
     "VICTORY_HOT_WINDOWS_MB",
@@ -1718,6 +1719,7 @@ const AB_SWITCHES: [&str; 12] = [
     "VICTORY_LATE_WAIT",
     "VICTORY_RELAY",
     "VICTORY_WIDE_REFRESH",
+    "VICTORY_WIDE_FILLS",
     "VICTORY_WIDE_BACK",
     "VICTORY_KEEP_SNAPSHOTS",
     "VICTORY_BACK_NOTE",

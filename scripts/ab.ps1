@@ -26,6 +26,7 @@
 #                  on its own thread; passes the flights tests on this machine)
 #   bestlate       best with VICTORY_LATE_WAIT=3
 #   wide           VICTORY_WIDE_REFRESH=1 (refreshes on several threads)
+#   fills          VICTORY_WIDE_FILLS=1 (a list's fills on several threads, not the refreshes)
 #   keepsnap       VICTORY_KEEP_SNAPSHOTS=1
 #   resid          VICTORY_RESIDENCY=1 (textures that find no room on the card go
 #                  to the PC's memory; the default from 009dd7a until 2026-11-27,
@@ -98,6 +99,7 @@ function Get-Overrides([string]$name) {
         '^bestrelay$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_TEXTURE_FROM_COPY = '1'; VICTORY_RELAY = '1' } }
         '^bestlate$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_TEXTURE_FROM_COPY = '1'; VICTORY_LATE_WAIT = '3' } }
         '^wide$' { return [ordered]@{ VICTORY_WIDE_REFRESH = '1' } }
+        '^fills$' { return [ordered]@{ VICTORY_WIDE_FILLS = '1' } }
         '^keepsnap$' { return [ordered]@{ VICTORY_KEEP_SNAPSHOTS = '1' } }
         '^relay$' { return [ordered]@{ VICTORY_RELAY = '1' } }
         '^late(\d)$' { return [ordered]@{ VICTORY_LATE_WAIT = $Matches[1] } }
@@ -470,7 +472,7 @@ try {
         # Every switch the configurations use is cleared first, so a
         # setting in run.config.bat does not leak into another configuration.
         foreach ($v in @('VICTORY_HOT_WINDOWS_MB', 'VICTORY_RESIDENCY', 'VICTORY_PROMOTE', 'VICTORY_RELAY', 'VICTORY_LATE_WAIT',
-                'VICTORY_CARD_BUFFERS_MIN_MB', 'VICTORY_CARD_BUFFERS_MB', 'VICTORY_WIDE_REFRESH', 'VICTORY_KEEP_SNAPSHOTS', 'VICTORY_BACK_NOTE',
+                'VICTORY_CARD_BUFFERS_MIN_MB', 'VICTORY_CARD_BUFFERS_MB', 'VICTORY_WIDE_REFRESH', 'VICTORY_WIDE_FILLS', 'VICTORY_KEEP_SNAPSHOTS', 'VICTORY_BACK_NOTE',
                 'VICTORY_TEXTURE_FROM_COPY')) {
             if (-not $over.Contains($v)) { $lines += "set `"$v=`"" }
         }

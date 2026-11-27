@@ -72,7 +72,7 @@ $ab = Join-Path $PSScriptRoot 'ab.ps1'
 $allStages = @('build', 'tests', 'bench', 'title', 'compare')
 # Every switch a configuration may set: cleared before each title run.
 $switches = @('VICTORY_HOT_WINDOWS_MB', 'VICTORY_RESIDENCY', 'VICTORY_PROMOTE', 'VICTORY_RELAY', 'VICTORY_LATE_WAIT',
-    'VICTORY_CARD_BUFFERS_MIN_MB', 'VICTORY_CARD_BUFFERS_MB', 'VICTORY_TEXTURE_FROM_COPY', 'VICTORY_WIDE_REFRESH',
+    'VICTORY_CARD_BUFFERS_MIN_MB', 'VICTORY_CARD_BUFFERS_MB', 'VICTORY_TEXTURE_FROM_COPY', 'VICTORY_WIDE_REFRESH', 'VICTORY_WIDE_FILLS',
     'VICTORY_WIDE_BACK', 'VICTORY_KEEP_SNAPSHOTS', 'VICTORY_BACK_NOTE')
 # The stand-in title's picture (tests\fixtures\test-title\src\main.rs): a
 # blue band over an 8 x 4 grid, block (r, c) in PALETTE[(r * 3 + c) % 8].

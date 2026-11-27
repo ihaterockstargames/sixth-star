@@ -5801,10 +5801,11 @@ impl HostList {
     fn run_deferred(&self, batch: &mut Batch) {
         #[cfg(feature = "diagnostics")]
         use crate::copystat::{C, add};
-        // With `VICTORY_WIDE_REFRESH=1`: fills in a row, done together on
-        // several threads before the next step of another kind.
+        // With `VICTORY_WIDE_FILLS=1` (or `VICTORY_WIDE_REFRESH=1`): fills
+        // in a row, done together on several threads before the next step
+        // of another kind.
         let mut fills = Fills::default();
-        let wide = wide_refresh();
+        let wide = wide_fills();
         for step in &self.deferred().copies {
             if !matches!(step, Step::Fill(..)) {
                 fills.run();
@@ -5894,7 +5895,8 @@ impl HostList {
 }
 
 /// A list's fills in a row (title memory into the list's own upload
-/// memory), done together (`VICTORY_WIDE_REFRESH=1`).
+/// memory), done together (`VICTORY_WIDE_FILLS=1`, or with
+/// `VICTORY_WIDE_REFRESH=1`).
 ///
 /// Each texture copy from a title buffer is a fill of its own: the
 /// stand-in title's sixteen 3 MB copies a frame were sixteen copies one
@@ -5976,6 +5978,25 @@ impl Fills {
 fn wide_refresh() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_WIDE_REFRESH").is_some_and(|v| v == "1"))
+}
+
+/// Whether a list's fills in a row run on several threads ([`Fills`]).
+///
+/// Its own switch, `VICTORY_WIDE_FILLS`, so that the fills can be measured
+/// (and made a default) apart from the refreshes: `1` on, `0` off, unset
+/// follows `VICTORY_WIDE_REFRESH`. Off by default.
+fn wide_fills() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| fills_switch(std::env::var_os("VICTORY_WIDE_FILLS").as_deref(), wide_refresh()))
+}
+
+/// `VICTORY_WIDE_FILLS`'s value, with what `VICTORY_WIDE_REFRESH` says.
+fn fills_switch(value: Option<&std::ffi::OsStr>, wide_refresh: bool) -> bool {
+    match value.and_then(|v| v.to_str()) {
+        Some("1") => true,
+        Some("0") => false,
+        _ => wide_refresh,
+    }
 }
 
 /// A submission's refreshes not done yet, merged per buffer copy into the
@@ -7779,8 +7800,19 @@ mod spare {
 
 #[cfg(test)]
 mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at the top of this file
-    use super::{Batch, Fills};
+    use super::{Batch, Fills, fills_switch};
+    use std::ffi::OsStr;
     use std::sync::Arc;
+
+    #[test]
+    fn the_fills_switch_follows_wide_refresh_unless_set() {
+        assert!(!fills_switch(None, false));
+        assert!(fills_switch(None, true));
+        assert!(fills_switch(Some(OsStr::new("1")), false));
+        assert!(!fills_switch(Some(OsStr::new("0")), true));
+        assert!(fills_switch(Some(OsStr::new("yes")), true));
+        assert!(!fills_switch(Some(OsStr::new("yes")), false));
+    }
 
     #[test]
     fn fills_are_cut_into_pieces_that_cover_them() {
