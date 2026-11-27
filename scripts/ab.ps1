@@ -67,7 +67,12 @@ param(
     [switch]$DryRun,
     # One long run for the stability record: 33 minutes, so that the
     # runner's session line passes 30 minutes after the first frame.
-    [switch]$Stability
+    [switch]$Stability,
+    # Also write the report as ab-report.json (for scripts/autotest.ps1).
+    [switch]$Json,
+    # Print the switches of this configuration as JSON and stop (for
+    # scripts/autotest.ps1, which runs the same configurations).
+    [string]$Overrides = ''
 )
 if ($Stability) {
     if (-not $PSBoundParameters.ContainsKey('Configs')) { $Configs = @('baseline') }
@@ -110,6 +115,14 @@ function Get-Overrides([string]$name) {
 }
 
 function Get-Name([string]$name) { if ($name -match '^([A-Za-z0-9_-]+):') { $Matches[1] } else { $name } }
+
+if ($Overrides) {
+    $o = Get-Overrides $Overrides
+    $h = @{}
+    foreach ($k in $o.Keys) { $h[$k] = $o[$k] }
+    $h | ConvertTo-Json -Compress
+    exit 0
+}
 
 # ---- reading a log -----------------------------------------------------------
 function Get-Median([double[]]$v) {
@@ -159,7 +172,7 @@ function Read-Run([string]$log) {
                 RamFree = $null; RamTotal = $null; Commit = $null; CommitLimit = $null; Private = $null; WorkingSet = $null; Faults = $null }
             if ($line -match 'the process kept ([\d.]+) of (\d+) logical cores busy') { $v.Cores = [double]$Matches[1] }
             if ($line -match 'the submitting thread \(\d+\) was busy (\d+)%') { $v.Submitter = [double]$Matches[1] }
-            if ($line -match 'the PC''s memory: ([\d.]+) of ([\d.]+) GiB in use, ([\d.]+) GiB free; the system''s commit ([\d.]+) of ([\d.]+) GiB; this process committed ([\d.]+) GiB, ([\d.]+) GiB of it in RAM') {
+            if ($line -match 'the PC''s memory: ([\d.]+) of ([\d.]+) GiB in use, ([\d.]+) GiB free; the system''s commit ([\d.]+) of ([\d.]+) GiB;\s+this process committed ([\d.]+) GiB, ([\d.]+) GiB of it in RAM') {
                 $v.RamTotal = [double]$Matches[2]; $v.RamFree = [double]$Matches[3]; $v.Commit = [double]$Matches[4]; $v.CommitLimit = [double]$Matches[5]
                 $v.Private = [double]$Matches[6]; $v.WorkingSet = [double]$Matches[7]
             }
@@ -345,6 +358,23 @@ function Write-Report($runs, [string]$path, $info) {
     $out.Add('')
     $out.Add('Send this file back as it is. It holds no paths but the logs'' and no game data.')
     [IO.File]::WriteAllLines($path, $out, (New-Object Text.UTF8Encoding($false)))
+    if ($Json) {
+        $json = foreach ($x in $runs) {
+            $r = $x.Run
+            [ordered]@{
+                name = $x.Name; settings = $x.Overrides; commit = $r.Commit; log = $r.Log
+                frameLines = $r.FrameLines; counted = $r.Counted; menuLines = $r.MenuLines
+                median = $r.Median; worstMs = $r.WorstMs; gpu = $r.GpuMedian; vram = $r.VramMedian
+                vramPeak = $r.VramPeak; ramFreeLowest = $r.RamFreeLowest
+                errors = $r.Errors; removed = $r.Removed; panics = $r.Panics; watchdog = $r.Watchdog
+                incompleteLines = $r.Incomplete.Count; incompleteLast = $r.IncompleteLast
+                sessionS = $r.SessionS; sessionFps = $r.SessionFps; worstFps = $r.WorstFps; longestGap = $r.LongestGap
+                firstError = $r.FirstError; exit = $r.Exit; seconds = $x.Seconds; stopped = $x.Stopped
+            }
+        }
+        $jsonPath = [IO.Path]::ChangeExtension($path, '.json')
+        [IO.File]::WriteAllText($jsonPath, (ConvertTo-Json -InputObject @($json) -Depth 6), (New-Object Text.UTF8Encoding($false)))
+    }
     $out | ForEach-Object { Write-Host $_ }
 }
 

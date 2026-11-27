@@ -104,7 +104,7 @@ pub(crate) fn ram() -> Option<Ram> {
 /// over `seconds` since `faults_before`.
 pub(crate) fn ram_text(ram: &Ram, faults_before: Option<u32>, seconds: f64) -> String {
     let mut text = format!(
-        "; the PC's memory: {:.1} of {:.1} GiB in use, {:.1} GiB free; the system's commit {:.1} of {:.1} GiB;          this process committed {:.2} GiB, {:.2} GiB of it in RAM (working set)",
+        "; the PC's memory: {:.1} of {:.1} GiB in use, {:.1} GiB free; the system's commit {:.1} of {:.1} GiB; this process committed {:.2} GiB, {:.2} GiB of it in RAM (working set)",
         gib(ram.total.saturating_sub(ram.free)),
         gib(ram.total),
         gib(ram.free),
@@ -294,7 +294,7 @@ mod tests {
         let text = ram_text(&m, Some(500), 2.0);
         assert!(text.contains("30.0 of 32.0 GiB in use, 2.0 GiB free"), "{text}");
         assert!(text.contains("commit 40.0 of 45.0 GiB"), "{text}");
-        assert!(text.contains("committed 20.00 GiB, 12.00 GiB of it in RAM"), "{text}");
+        assert!(text.contains("commit 40.0 of 45.0 GiB; this process committed 20.00 GiB, 12.00 GiB of it in RAM"), "{text}");
         assert!(text.ends_with(", 500 page faults/s"), "{text}");
         assert!(!ram_text(&m, None, 0.0).contains("faults"));
         // The fault counter wraps.

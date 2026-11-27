@@ -1,0 +1,28 @@
+# A stand-in title that renders, written by us: the autonomous test runner's
+# workload through the whole runtime (loader, imports, the console's graphics
+# interfaces, title memory, copies, present). It is NOT a workspace member:
+# the runner and the integration test build it on demand into their own
+# target folder. It imports from `d3d12_xs.dll`, which does not exist on a
+# PC, so it only runs when loaded through `sixth-star run --execute`.
+[package]
+name = "test-title"
+version = "0.0.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "test-title"
+path = "src/main.rs"
+test = false
+bench = false
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+debug = false
+
+[workspace]
