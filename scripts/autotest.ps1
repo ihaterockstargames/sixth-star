@@ -20,6 +20,10 @@
 # <Root>\cycles\<n>; <Root>\latest.md is the last report, and
 # <Root>\history.jsonl holds one line per finished cycle.
 #
+# One runner at a time: while one runs, <Root>\autotest.lock is held, and a
+# second runner (a scheduled run that comes while a cycle still goes) stops
+# at once with exit code 3.
+#
 #   autotest.bat                                one cycle, every stage
 #   autotest.bat -Cycles 0 -PauseMinutes 30     cycles until stopped
 #   autotest.bat -Stages title,compare          only the title runs and the comparison
@@ -394,51 +398,88 @@ function Write-CycleReport($cycle, [string]$dir) {
     [IO.File]::WriteAllText((Join-Path $Root 'latest.md'), $text, (New-Object Text.UTF8Encoding($false)))
 }
 
-# ---- the cycles -----------------------------------------------------------------------
-$done = 0
-while ($Cycles -eq 0 -or $done -lt $Cycles) {
-    $state = Load-State
-    if ($Fresh -or -not $state -or $state.finished) {
-        $n = if ($state) { [int]$state.cycle + 1 } else { 1 }
-        $state = [ordered]@{ cycle = $n; started = (Get-Date -Format 'yyyy-MM-dd HH:mm'); stages = @($Stages); results = [ordered]@{}; finished = $false }
-        Save-State $state
-        Say "cycle $n begins: $($Stages -join ', ')"
-    } else {
-        Say "cycle $($state.cycle) goes on from where it stopped"
-    }
-    $Fresh = $false
-    $dir = Join-Path $Root "cycles\$($state.cycle)"
-    New-Item -ItemType Directory -Force $dir | Out-Null
-    foreach ($stage in $allStages) {
-        if ($state.stages -notcontains $stage) { continue }
-        if ($state.results.Contains($stage) -and $stage -ne 'title') { continue }
-        Say "stage $stage"
-        switch ($stage) {
-            'build' { $state.results.build = Stage-Build $dir }
-            'tests' { $state.results.tests = Stage-Tests $dir }
-            'bench' { $state.results.bench = Stage-Bench $dir }
-            'title' {
-                if (-not (Test-Path $diagExe) -or -not (Test-Path $titleExe)) { Say 'title: no diagnostics build or no stand-in title (run the build stage)'; $state.results.title = [ordered]@{}; break }
-                if (-not $state.results.Contains('title')) { $state.results.title = [ordered]@{} }
-                $titleDir = Join-Path $dir 'title'
-                foreach ($config in $Configs) {
-                    if ($state.results.title.Contains($config)) { continue }
-                    $state.results.title[$config] = Invoke-Title $config $titleDir
-                    Save-State $state
-                }
-            }
-            'compare' { $state.results.compare = Stage-Compare $state }
+# ---- one runner at a time --------------------------------------------------------------
+# Two runners would share state.json and the GPU. The lock is a file opened
+# delete-on-close, so it goes when the runner's process ends, however it ends.
+# One left behind by a power cut has no handle and can be removed; a held one
+# cannot (it is shared for reading only).
+$lockPath = Join-Path $Root 'autotest.lock'
+function Lock-Runner {
+    for ($i = 0; $i -lt 2; $i++) {
+        try {
+            $f = [IO.FileStream]::new($lockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read, 4096, [IO.FileOptions]::DeleteOnClose)
+            $b = [Text.Encoding]::UTF8.GetBytes("pid $PID since $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+            $f.Write($b, 0, $b.Length)
+            $f.Flush()
+            return $f
+        } catch {
+            if (-not (Test-Path -LiteralPath $lockPath)) { continue }
+            try { Remove-Item -LiteralPath $lockPath -Force -ErrorAction Stop } catch { return $null }
         }
-        Save-State $state
-        if ($stage -eq 'build' -and -not $state.results.build.ok) { Say 'the build failed: the cycle stops here'; break }
     }
-    $state.finished = $true
-    $state.ended = (Get-Date -Format 'yyyy-MM-dd HH:mm')
-    Save-State $state
-    Write-CycleReport $state $dir
-    Add-Content -Path $historyPath -Value (ConvertTo-Json -InputObject $state -Depth 12 -Compress) -Encoding UTF8
-    Say "cycle $($state.cycle) done: $(Join-Path $dir 'report.md')"
-    $done++
-    if ($Cycles -ne 0 -and $done -ge $Cycles) { break }
-    if ($PauseMinutes -gt 0) { Say "next cycle in $PauseMinutes minutes"; Start-Sleep -Seconds ($PauseMinutes * 60) }
+    return $null
+}
+function Get-LockHolder {
+    try {
+        $f = [IO.File]::Open($lockPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite, Delete')
+        try { return (New-Object IO.StreamReader($f)).ReadToEnd() } finally { $f.Dispose() }
+    } catch { return 'not readable' }
+}
+$lock = Lock-Runner
+if (-not $lock) {
+    Say "another runner is going ($(Get-LockHolder)): this one stops"
+    exit 3
+}
+
+# ---- the cycles -----------------------------------------------------------------------
+try {
+    $done = 0
+    while ($Cycles -eq 0 -or $done -lt $Cycles) {
+        $state = Load-State
+        if ($Fresh -or -not $state -or $state.finished) {
+            $n = if ($state) { [int]$state.cycle + 1 } else { 1 }
+            $state = [ordered]@{ cycle = $n; started = (Get-Date -Format 'yyyy-MM-dd HH:mm'); stages = @($Stages); results = [ordered]@{}; finished = $false }
+            Save-State $state
+            Say "cycle $n begins: $($Stages -join ', ')"
+        } else {
+            Say "cycle $($state.cycle) goes on from where it stopped"
+        }
+        $Fresh = $false
+        $dir = Join-Path $Root "cycles\$($state.cycle)"
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        foreach ($stage in $allStages) {
+            if ($state.stages -notcontains $stage) { continue }
+            if ($state.results.Contains($stage) -and $stage -ne 'title') { continue }
+            Say "stage $stage"
+            switch ($stage) {
+                'build' { $state.results.build = Stage-Build $dir }
+                'tests' { $state.results.tests = Stage-Tests $dir }
+                'bench' { $state.results.bench = Stage-Bench $dir }
+                'title' {
+                    if (-not (Test-Path $diagExe) -or -not (Test-Path $titleExe)) { Say 'title: no diagnostics build or no stand-in title (run the build stage)'; $state.results.title = [ordered]@{}; break }
+                    if (-not $state.results.Contains('title')) { $state.results.title = [ordered]@{} }
+                    $titleDir = Join-Path $dir 'title'
+                    foreach ($config in $Configs) {
+                        if ($state.results.title.Contains($config)) { continue }
+                        $state.results.title[$config] = Invoke-Title $config $titleDir
+                        Save-State $state
+                    }
+                }
+                'compare' { $state.results.compare = Stage-Compare $state }
+            }
+            Save-State $state
+            if ($stage -eq 'build' -and -not $state.results.build.ok) { Say 'the build failed: the cycle stops here'; break }
+        }
+        $state.finished = $true
+        $state.ended = (Get-Date -Format 'yyyy-MM-dd HH:mm')
+        Save-State $state
+        Write-CycleReport $state $dir
+        Add-Content -Path $historyPath -Value (ConvertTo-Json -InputObject $state -Depth 12 -Compress) -Encoding UTF8
+        Say "cycle $($state.cycle) done: $(Join-Path $dir 'report.md')"
+        $done++
+        if ($Cycles -ne 0 -and $done -ge $Cycles) { break }
+        if ($PauseMinutes -gt 0) { Say "next cycle in $PauseMinutes minutes"; Start-Sleep -Seconds ($PauseMinutes * 60) }
+    }
+} finally {
+    $lock.Dispose()
 }
