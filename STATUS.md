@@ -252,6 +252,17 @@ Cycles 18 to 20, 2026-11-27 (night run):
   Both switches stay off by default: the refreshes of the test title are
   not measured with them.
 
+- Cycles 21-22 (full, `cae5557` and `dfec235`): all green, 673 tests
+  passed, every synthetic byte right, every picture right.
+- `dfec235` (the runner): a seventh default configuration, `copies16`
+  (16 buffers, 49.2 MB a frame): CPU preparing 2.7 ms, GPU work 1.9 ms,
+  picture right.
+- `VICTORY_WIDE_REFRESH=1` measured in the synthetic frame model
+  (`flights::frame_child`, which copies the test title's pattern of
+  refreshes), two runs each: CPU preparing 40.4 / 39.2 -> 38.2 / 37.1 ms
+  (about 5%), while the refreshes' CPU time over all threads doubled
+  (2.9 -> 6.8 ms). Too little to make it a default; it stays off.
+
 ## Where the frame time goes (2026-11-26, gameplay)
 
 Gameplay, measured by the maintainer from the runner's frame line on 2026-11-26:
@@ -305,6 +316,7 @@ Task Manager figures were not taken for this run.
 | 2026-11-27 | `6133e9d` | stand-in title, 16 copies: CPU preparing 4.2 -> 2.7 ms with `VICTORY_WIDE_REFRESH=1` (fills on several threads); default unchanged; a flaky test fixed (`0875a24`) | automated night run, on this machine; not the test title |
 | 2026-11-27 | `ae1ceaf` | wide fills on by default (`VICTORY_WIDE_FILLS=0` off): stand-in title, 8 copies, CPU preparing 2.2 -> 1.4 ms; 16 copies 4.2 -> 2.7 ms; same GPU work and picture; 673 tests passed | automated night run, on this machine; not the test title |
 | 2026-11-27 | `549c761` | the runner's comparison with the previous cycle works again (it had compared nothing); stand-in title, 8 buffers: `texcopy` CPU preparing 2.6 / 2.7 -> 2.0 / 2.1 ms with `VICTORY_WIDE_REFRESH=1`; defaults unchanged | automated, on the stand-in title (no game) |
+| 2026-11-27 | `dfec235` | the runner runs `copies16` (16 buffers) by default: CPU preparing 2.7 ms, picture right; `VICTORY_WIDE_REFRESH=1` in the synthetic frame model only ~5% less CPU preparing, so it stays off | automated, on the stand-in title and a synthetic model (no game) |
 | 2026-11-27 | `e847242` | texture fallback off by default again; the PC's memory on the frame line; `ab.bat` counts gameplay frame lines only | not measured on the title yet |
 | 2026-11-27 | `b5efb43` | stability run (`best` switches): ended by itself after a session of about 6 min (exit code 1), gameplay ~0.2 FPS | from the runner's lines; no error, device removal or panic logged; seen as a crash by the maintainer |
 | 2026-11-27 | `b5efb43` | gameplay ~0.7 FPS (median 1,438.3 ms/frame) with the defaults (fallback on); ~0.9 FPS (1,076.4 ms/frame) with `VICTORY_TEXTURE_FROM_COPY=1` | measured by the maintainer with `ab.bat` (gameplay frame lines only, from 120 s on, one run each); slower than 2026-11-26; no errors, device removals or panics; sometimes missing textures (user-reported) |
