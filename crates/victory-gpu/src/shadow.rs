@@ -4183,8 +4183,18 @@ mod hot_window_tests {
             drop(ask(at, frame));
         }
         assert!(ask(at, 9500 + HOT_FRAMES).carded(), "the cold one is on the card");
+        // Hot copies other tests left on the card are colder still: each
+        // goes back first, one a sweep, before ours does (with enough of
+        // them, 19 frames were too few: cycle 4 of 2026-11-27).
+        let others = super::HOT_COPIES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|c| c.strong_count() > 0)
+            .count() as u64;
+        let end = 9520 + HOT_FRAMES + others;
         // The hot one: asked ten times a frame, finds the budget full.
-        for frame in 9501 + HOT_FRAMES..9520 + HOT_FRAMES {
+        for frame in 9501 + HOT_FRAMES..end {
             drop(ask(at, frame));
             for _ in 0..10 {
                 drop(ask(at + WINDOW, frame));
@@ -4196,7 +4206,7 @@ mod hot_window_tests {
                 break;
             }
         }
-        assert!(ask(at + WINDOW, 9600).carded(), "the hotter one took the card");
+        assert!(ask(at + WINDOW, end).carded(), "the hotter one took the card");
         assert!(super::SWAPPED.load(std::sync::atomic::Ordering::Relaxed) > swapped, "by a swap");
         TEST_HOT.with(|h| h.set(None));
         TEST_FRAME.with(|f| f.set(None));
