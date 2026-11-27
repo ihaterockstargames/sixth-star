@@ -1026,6 +1026,52 @@ mod tests {
         }
     }
 
+    /// Isolated benchmark: the kernel's copy of 3 MiB refreshes from memory
+    /// not in the caches (a 192 MiB pool walked in turn), whole and in
+    /// pieces, against a plain copy. Prints GB/s; asserts only equality.
+    /// `cargo test -p victory-gpu --release cold_piece_benchmark -- --ignored --nocapture`
+    ///
+    /// Measured 2026-11-27 (Ryzen 7 5800X): kernel whole 10.7 GB/s, in
+    /// 1 MiB pieces 9.1, 256 KiB 9.5, 64 KiB 8.8; plain 20.3. Cutting the
+    /// kernel's copy into pieces does not help; the plain copy does.
+    #[test]
+    #[ignore = "benchmark"]
+    fn cold_piece_benchmark() {
+        const COPY: usize = 3 << 20;
+        const POOL: usize = 64;
+        let src: Vec<u8> = (0..COPY * POOL).map(|i| (i * 31 + 7) as u8).collect();
+        let mut dst = vec![0u8; COPY * POOL];
+        let modes: [(&str, usize); 5] = [
+            ("kernel whole", 0),
+            ("kernel 1 MiB", 1 << 20),
+            ("kernel 256 KiB", 256 << 10),
+            ("kernel 64 KiB", 64 << 10),
+            ("plain", usize::MAX),
+        ];
+        for (name, piece) in modes {
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let started = std::time::Instant::now();
+                for k in 0..POOL {
+                    let (s, d) = (src[k * COPY..].as_ptr(), dst[k * COPY..].as_mut_ptr());
+                    match piece {
+                        0 => assert!(super::read(s, d, COPY)),
+                        usize::MAX => unsafe { std::ptr::copy_nonoverlapping(s, d, COPY) },
+                        p => {
+                            for at in (0..COPY).step_by(p) {
+                                assert!(super::read(s.wrapping_add(at), d.wrapping_add(at), p.min(COPY - at)));
+                            }
+                        }
+                    }
+                }
+                best = best.min(started.elapsed().as_secs_f64());
+            }
+            assert!(dst == src);
+            println!("cold_piece_benchmark: {name:>14}: {:.2} GB/s", (COPY * POOL) as f64 / best / 1e9);
+            dst.fill(0);
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -6269,6 +6315,14 @@ pub(crate) fn read_into(src: *const u8, dst: &mut [u8]) -> bool {
 /// the gain is about 1.3 ms for 32 MB. Moving the bytes is not what makes a
 /// frame's "copies" take tens of milliseconds (finding what changed is), so
 /// the switch stays off: kept as a measured experiment, not a lever.
+///
+/// On the stand-in title (2026-11-27, two runs each), whose refreshes copy
+/// whole 3 MB buffers from memory not in the caches (`cold_piece_benchmark`:
+/// kernel 10.7 GB/s, plain 20.3), it does pay: with
+/// `VICTORY_TEXTURE_FROM_COPY=1` CPU preparing fell 2.6 -> 1.8 and 2.7 ->
+/// 1.7 ms at 8 copies, 5.5 -> 3.5 ms at 16, with the same GPU work and
+/// picture. Still off by default: the gap above is unmeasured on a title
+/// (`ab.ps1` configurations `texplain`, `bestplain`).
 fn plain_copy() -> bool {
     #[cfg(test)]
     if let Some(on) = PLAIN_COPY_TEST.with(std::cell::Cell::get) {

@@ -25,7 +25,11 @@
 #   bestrelay      best with VICTORY_RELAY=1 (submissions in flight, copy-back
 #                  on its own thread; passes the flights tests on this machine)
 #   bestlate       best with VICTORY_LATE_WAIT=3
-#   wide           VICTORY_WIDE_REFRESH=1 (refreshes on several threads)
+#   texplain       texcopy with VICTORY_PLAIN_COPY=1 (host copies of title memory
+#                  read in place, not through the kernel; stand-in title,
+#                  2026-11-27: CPU preparing 2.7 -> 1.7 ms at 8 copies)
+#   bestplain      best with VICTORY_PLAIN_COPY=1
+#   wide          VICTORY_WIDE_REFRESH=1 (refreshes on several threads)
 #   fills          VICTORY_WIDE_FILLS=1 (a list's fills on several threads; the default
 #                  since 2026-11-27)
 #   nofills        VICTORY_WIDE_FILLS=0 (fills one after the other, as before)
@@ -100,6 +104,8 @@ function Get-Overrides([string]$name) {
         '^bestauto$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = 'auto'; VICTORY_TEXTURE_FROM_COPY = '1' } }
         '^bestrelay$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_TEXTURE_FROM_COPY = '1'; VICTORY_RELAY = '1' } }
         '^bestlate$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_TEXTURE_FROM_COPY = '1'; VICTORY_LATE_WAIT = '3' } }
+        '^texplain$' { return [ordered]@{ VICTORY_TEXTURE_FROM_COPY = '1'; VICTORY_PLAIN_COPY = '1' } }
+        '^bestplain$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_TEXTURE_FROM_COPY = '1'; VICTORY_PLAIN_COPY = '1' } }
         '^wide$' { return [ordered]@{ VICTORY_WIDE_REFRESH = '1' } }
         '^fills$' { return [ordered]@{ VICTORY_WIDE_FILLS = '1' } }
         '^nofills$' { return [ordered]@{ VICTORY_WIDE_FILLS = '0' } }
