@@ -232,6 +232,26 @@ Cycles 9 to 17, 2026-11-27 (night run):
   2.1 ms, 16 buffers 2.7 against 4.2 ms. Fills of less than 2 MiB in all
   stay on the submitting thread. Not measured on the test title yet.
 
+Cycles 18 to 20, 2026-11-27 (night run):
+
+- Cycle 18 (full, `b839955`): all green, 673 tests passed, every
+  synthetic byte right, 6 of 6 configurations with the right picture.
+- `549c761` (the runner): the comparison with the previous cycle had
+  compared nothing since the runner began. A list of one came back from
+  the saved state as its single item, so the last cycle's run was
+  never found. It compares again, a resumed cycle keeps its finished
+  runs, and named configurations (`name:VAR=v`) run.
+- Measured, not a default: `texcopy` with `VICTORY_WIDE_REFRESH=1`
+  (refreshes on several threads), 8 buffers, CPU preparing in ms:
+
+| Configuration | Run 1 | Run 2 | GPU work, ms | Picture |
+|---|---|---|---|---|
+| `texcopy` | 2.6 | 2.7 | 1.0 | right |
+| `texcopy` + `VICTORY_WIDE_REFRESH=1` | 2.0 | 2.1 | 1.0 | right |
+
+  Both switches stay off by default: the refreshes of the test title are
+  not measured with them.
+
 ## Where the frame time goes (2026-11-26, gameplay)
 
 Gameplay, measured by the maintainer from the runner's frame line on 2026-11-26:
@@ -284,6 +304,7 @@ Task Manager figures were not taken for this run.
 | 2026-11-27 | `a6ab611` | autonomous test runner (`autotest.bat`) and a stand-in title through the runtime: 6 of 6 configurations ran and showed the right picture; 669 tests passed | automated, on this machine; not the test title |
 | 2026-11-27 | `6133e9d` | stand-in title, 16 copies: CPU preparing 4.2 -> 2.7 ms with `VICTORY_WIDE_REFRESH=1` (fills on several threads); default unchanged; a flaky test fixed (`0875a24`) | automated night run, on this machine; not the test title |
 | 2026-11-27 | `ae1ceaf` | wide fills on by default (`VICTORY_WIDE_FILLS=0` off): stand-in title, 8 copies, CPU preparing 2.2 -> 1.4 ms; 16 copies 4.2 -> 2.7 ms; same GPU work and picture; 673 tests passed | automated night run, on this machine; not the test title |
+| 2026-11-27 | `549c761` | the runner's comparison with the previous cycle works again (it had compared nothing); stand-in title, 8 buffers: `texcopy` CPU preparing 2.6 / 2.7 -> 2.0 / 2.1 ms with `VICTORY_WIDE_REFRESH=1`; defaults unchanged | automated, on the stand-in title (no game) |
 | 2026-11-27 | `e847242` | texture fallback off by default again; the PC's memory on the frame line; `ab.bat` counts gameplay frame lines only | not measured on the title yet |
 | 2026-11-27 | `b5efb43` | stability run (`best` switches): ended by itself after a session of about 6 min (exit code 1), gameplay ~0.2 FPS | from the runner's lines; no error, device removal or panic logged; seen as a crash by the maintainer |
 | 2026-11-27 | `b5efb43` | gameplay ~0.7 FPS (median 1,438.3 ms/frame) with the defaults (fallback on); ~0.9 FPS (1,076.4 ms/frame) with `VICTORY_TEXTURE_FROM_COPY=1` | measured by the maintainer with `ab.bat` (gameplay frame lines only, from 120 s on, one run each); slower than 2026-11-26; no errors, device removals or panics; sometimes missing textures (user-reported) |
