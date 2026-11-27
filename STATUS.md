@@ -1,7 +1,7 @@
 # Sixth Star — test status
 
-Last updated: 2026-11-26 (night)
-Build: current main
+Last updated: 2026-11-27
+Build: `b5efb43`
 Binary: sixth-star.exe
 
 Sixth Star is a general Windows compatibility layer for Xbox Series X|S GDK
@@ -13,11 +13,11 @@ titles. No game files are included; the user supplies their own dump.
 |---|---|
 | Stage | In-game (stage 6): gameplay is reached; **not playable yet** |
 | Loading and menus | ~30 FPS (user-reported, approximate) |
-| Gameplay | **4.59 FPS** (217.9 ms/frame), measured by the maintainer from the runner's frame line on 2026-11-26 |
+| Gameplay | **~0.7 FPS** (median 1,470.8 ms/frame) with the default settings of `b5efb43`, measured by the maintainer with `ab.bat` on 2026-11-27 (median of the frame lines from 120 s on, one run). This is **slower** than the 4.59 FPS measured on an earlier build on 2026-11-26; the cause is not confirmed yet (see "A/B on the title, 2026-11-27") |
 | Intro cutscene | 21.5–23.0 FPS (43.6–46.5 ms/frame), measured by the maintainer from the runner's frame line on 2026-11-26 |
-| What limits it | in gameplay, **the serial path**: CPU preparing, waiting for the GPU and copying back follow one another (see below); in the intro cutscene, the CPU |
-| Stability | in the maintainer's latest session on 2026-11-26 the title ran without a crash; the session's length was not recorded. An earlier run that day froze in the intro cutscene. From the next build the runner logs the exact session length every minute (see Notes) |
-| Picture | experimental: flickering, missing character textures (observed by the maintainer). From `009dd7a` textures that found no room on the card are made in the PC's memory instead of being left out; whether that fixes the missing textures is not measured yet |
+| What limits it | on `b5efb43` in gameplay: CPU preparing (~350 ms), the GPU (~264 ms, of which ~220 ms the title's own work) and copying back (~269 ms), in series, with about 6 GiB of textures in the PC's memory because the card was past its budget |
+| Stability | **not measured yet.** In a 33-minute stability run on `b5efb43` on 2026-11-27 the title crashed (user-reported; the time of the crash is not recorded yet). In the A/B runs that followed, no run reported an error, a device removal or a panic. An earlier run on 2026-11-26 froze in the intro cutscene |
+| Picture | experimental: a flickering intro, sometimes missing textures in gameplay (user-reported on 2026-11-27, `b5efb43`: "textures better, I think", still missing at times) |
 | Output | 1920x1080 |
 | Resizable BAR | enabled |
 | DirectStorage / BCPack | console DirectStorage HLE active; BCPack tables found |
@@ -57,7 +57,8 @@ minutes or more without a crash; that has not been reached or measured.
   fills go to the PC's memory, which the GPU reads about 9x slower (synthetic
   measurement below) but which shows them; render targets stay on the card.
   `VICTORY_RESIDENCY=0` restores the old rule (such textures were not made
-  while the card was full). Every measurement above predates it.
+  while the card was full). The 2026-11-26 measurements predate it; the
+  2026-11-27 A/B ran with it on.
 - Textures back to the card (since `e2453a4`, default on): once the card is
   below 80% of its budget again, textures that went to the PC's memory are
   made again on the card, and the descriptor slots that showed them are
@@ -82,14 +83,51 @@ minutes or more without a crash; that has not been reached or measured.
   default**): `VICTORY_TEXTURE_FROM_COPY=1` makes a title copy from a buffer
   into a texture read the buffer's host copy, which is kept up to date page
   by page, instead of filling a fresh upload buffer from title memory with
-  every byte, every time. Part of `ab.bat`'s `best`. Not measured on the
-  title yet.
+  every byte, every time. Part of `ab.bat`'s `best`. Measured once on the
+  title on 2026-11-27 (see the A/B below).
 - Copy-back noting (since `bb57383`, default on): pages a copy-back wrote
   whole are no longer copied back into the same copy at the next refresh.
   `VICTORY_BACK_NOTE=0` turns it off.
 - A local pipeline skip list was active in every 2026-11-26 measurement (see
   Notes). Every figure on this page is from this machine with these
   settings.
+
+## A/B on the title, 2026-11-27
+
+Measured by the maintainer with `ab.bat` on 2026-11-27, build `b5efb43`,
+RTX 3070, 1080p, ReBAR on, `DRED=1`, the local skip list active. Median of
+the runner's frame lines from 120 s after the first frame line; one run each,
+about 5 minutes each.
+
+| Measure | baseline (defaults) | `VICTORY_TEXTURE_FROM_COPY=1` |
+|---|---|---|
+| Frame lines counted | 21 of 42 | 29 of 49 |
+| FPS (median) | 0.70 | 0.90 |
+| ms/frame (median) | 1,470.8 | 1,076.4 |
+| Worst frame line, ms | 12,383.4 | 4,870.2 |
+| CPU preparing, ms | 350.3 | 337.2 |
+| On the GPU (fence wait), ms | 263.7 | 220.5 |
+| GPU timestamps: the title's work, ms | 219.5 | 188.8 |
+| Copying back, ms (MB) | 269.1 (45.7) | 243.9 (65.5) |
+| Draws per frame; dropped without a pipeline | 2,993; 675 | 1,631; 218 |
+| VRAM used of budget, GiB | 5.50 of 6.23 | 5.51 of 6.34 |
+| Textures in the PC's memory for lack of room on the card | 16,539 (6,269 MiB) | 14,280 (4,917 MiB) |
+| Errors / device removed / panics | 0 / 0 / 0 | 0 / 0 / 0 |
+
+- The runner's session averages for these runs (11.54 and 7.48 FPS) count
+  the menus at ~30 FPS as well; they are **not** gameplay figures.
+- `VICTORY_HOT_WINDOWS_MB=1024` and the card-buffer switches were also
+  started, but the maintainer closed those runs before gameplay (the 30 FPS
+  in the `hot1024` run is the menus: 13 draws per frame). They are **not
+  measured** on gameplay.
+- Compared with the 2026-11-26 gameplay figures (82.3 ms preparing, 86.6 ms
+  on the GPU, 44.7 ms copying back), every part of the frame is several
+  times larger, and the card was past its budget with gigabytes of textures
+  in the PC's memory, which the GPU reads over PCIe. Whether the texture
+  residency rule (default on since `009dd7a`) causes the slowdown is not
+  confirmed; the next run compares it with `VICTORY_RESIDENCY=0`, and
+  promotion and copy-back noting with their switches off. The scene may also
+  have been heavier than on 2026-11-26.
 
 ## Where the frame time goes (2026-11-26, gameplay)
 
@@ -140,6 +178,8 @@ Task Manager figures were not taken for this run.
 | 2026-11-26 | current main | ~30 FPS loading/menus, ~5 FPS in-game | first public record; user-reported, approximate; 1080p, ReBAR on |
 | 2026-11-26 | current main (build not recorded) | ran without a crash | latest session, observed by the maintainer; length not recorded |
 | 2026-11-26 | current main (build not recorded) | gameplay 4.59 FPS (217.9 ms/frame) | measured by the maintainer from the runner's frame line on 2026-11-26: 82.3 ms CPU preparing, 86.6 ms waiting for the GPU, 44.7 ms copying back, in series |
+| 2026-11-27 | `b5efb43` | stability run: the title crashed | user-reported; the time of the crash is not recorded yet |
+| 2026-11-27 | `b5efb43` | gameplay ~0.7 FPS (median 1,470.8 ms/frame) with the defaults; ~0.9 FPS (1,076.4 ms/frame) with `VICTORY_TEXTURE_FROM_COPY=1` | measured by the maintainer with `ab.bat` (median of the frame lines from 120 s on, one run each); slower than 2026-11-26, cause not confirmed; no errors, device removals or panics; sometimes missing textures (user-reported) |
 | 2026-11-26 | `3bc7b56` | intro cutscene 21.5–23.0 FPS, then the picture froze | measured by the maintainer from the runner's frame line on 2026-11-26: ~27 ms CPU preparing, ~11 ms GPU, GPU ~25% busy (CPU-bound); flickering, missing character textures and a slow start-up observed by the maintainer |
 
 ## Notes
