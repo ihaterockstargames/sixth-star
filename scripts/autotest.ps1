@@ -39,8 +39,10 @@ param(
     # Minutes between cycles.
     [int]$PauseMinutes = 0,
     [string[]]$Stages = @('build', 'tests', 'bench', 'title', 'compare'),
-    # The configurations of the title runs (ab.ps1's names).
-    [string[]]$Configs = @('baseline', 'resid', 'texcopy', 'hot1024', 'cardbuf1', 'best'),
+    # The configurations of the title runs (ab.ps1's names). A named one
+    # (`name:VAR=v`) may set TEST_TITLE_COPIES: copies16 is the default
+    # settings with twice the buffers, where costs per byte show.
+    [string[]]$Configs = @('baseline', 'resid', 'texcopy', 'hot1024', 'cardbuf1', 'best', 'copies16:TEST_TITLE_COPIES=16'),
     # How long each title run lasts.
     [int]$TitleSeconds = 45,
     # Buffers the stand-in title rewrites and copies each frame.
@@ -379,7 +381,7 @@ function Write-CycleReport($cycle, [string]$dir) {
     $titles = $cycle.results.title
     if ($titles) {
         $o.Add('')
-        $o.Add("## Stand-in title through sixth-star.exe ($TitleSeconds s each, $TitleCopies buffers of 3 MB rewritten and copied per frame)")
+        $o.Add("## Stand-in title through sixth-star.exe ($TitleSeconds s each, $TitleCopies buffers of 3 MB rewritten and copied per frame unless a configuration sets TEST_TITLE_COPIES)")
         $o.Add('')
         $o.Add('The window is held to the display (60 Hz), so the frame time says little; the runtime''s own costs per frame (CPU preparing, the GPU''s work by its timestamps, copying back) are what the comparison uses.')
         $o.Add('')
