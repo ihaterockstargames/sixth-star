@@ -291,6 +291,13 @@ Task Manager figures were not taken for this run.
   25.2 GB/s and 1 GiB on the card at 403 GB/s (16x). While it reads the
   PC's memory, the CPU's own copies (four threads) run at 23.0 GB/s instead
   of 26.8 (-14%); while it reads the card, at 27.1 (+1%).
+- Synthetic, on this machine (not the title; 2026-11-27,
+  `pipeline_contention_bench`, driver 610.88): making pipelines from shaders
+  the driver has not seen, on 2, 4 or 8 threads at the workers' priority
+  (50-72 ms each), does not hold up the thread that records and submits:
+  record and submit took 0.043 ms (median) alone and 0.051 ms with 8 makers,
+  1.0 ms at worst. The 5.5 s gameplay frames of the stability run are not
+  explained by the driver locking submission while pipelines are made.
 - Texture promotion acts only with the fallback on (off by default since
   `e847242`).
 - The runner's frame line (logged every few seconds) splits each frame into
