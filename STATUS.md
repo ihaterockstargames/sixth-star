@@ -263,6 +263,27 @@ Cycles 18 to 20, 2026-11-27 (night run):
   (about 5%), while the refreshes' CPU time over all threads doubled
   (2.9 -> 6.8 ms). Too little to make it a default; it stays off.
 
+Cycles 23 to 26, 2026-11-27 (night run):
+
+- Cycles 23 and 26 (full, `2fae6be` and `19ea118`): all green, 673 tests
+  passed, every synthetic byte right, every picture right.
+- Measured, not a default: `VICTORY_PLAIN_COPY=1` (host copies of title
+  memory read in place, not through the kernel) with `texcopy`. The
+  stand-in's refreshes copy whole 3 MB buffers from memory not in the
+  caches; there the kernel's copy moves 10.7 GB/s and a plain copy 20.3
+  (`cold_piece_benchmark`; cutting the kernel's copy into pieces gives
+  8.8-9.5). CPU preparing in ms:
+
+| Buffers of 3 MB copied a frame | `texcopy` | `texcopy` + `VICTORY_PLAIN_COPY=1` | GPU work, ms | Picture |
+|---|---|---|---|---|
+| 8 (three runs) | 2.6 / 2.7 / 2.7 | 1.8 / 1.7 / 1.7 | 1.0 | right |
+| 16 | 5.5 | 3.5 | 1.9 | right |
+
+  The switch stays **off by default**: the plain copy does not cover a
+  title freeing its own memory while a copy runs, and the test title's
+  refreshes are not measured with it. `ab.bat` has the configurations
+  `texplain` and `bestplain` for that.
+
 ## Where the frame time goes (2026-11-26, gameplay)
 
 Gameplay, measured by the maintainer from the runner's frame line on 2026-11-26:
@@ -317,6 +338,7 @@ Task Manager figures were not taken for this run.
 | 2026-11-27 | `ae1ceaf` | wide fills on by default (`VICTORY_WIDE_FILLS=0` off): stand-in title, 8 copies, CPU preparing 2.2 -> 1.4 ms; 16 copies 4.2 -> 2.7 ms; same GPU work and picture; 673 tests passed | automated night run, on this machine; not the test title |
 | 2026-11-27 | `549c761` | the runner's comparison with the previous cycle works again (it had compared nothing); stand-in title, 8 buffers: `texcopy` CPU preparing 2.6 / 2.7 -> 2.0 / 2.1 ms with `VICTORY_WIDE_REFRESH=1`; defaults unchanged | automated, on the stand-in title (no game) |
 | 2026-11-27 | `dfec235` | the runner runs `copies16` (16 buffers) by default: CPU preparing 2.7 ms, picture right; `VICTORY_WIDE_REFRESH=1` in the synthetic frame model only ~5% less CPU preparing, so it stays off | automated, on the stand-in title and a synthetic model (no game) |
+| 2026-11-27 | `19ea118` | stand-in title, 8 buffers: `texcopy` CPU preparing 2.6-2.7 -> 1.7-1.8 ms with `VICTORY_PLAIN_COPY=1`, 16 buffers 5.5 -> 3.5 ms; same GPU work and picture; default unchanged | automated night run, on the stand-in title (no game) |
 | 2026-11-27 | `e847242` | texture fallback off by default again; the PC's memory on the frame line; `ab.bat` counts gameplay frame lines only | not measured on the title yet |
 | 2026-11-27 | `b5efb43` | stability run (`best` switches): ended by itself after a session of about 6 min (exit code 1), gameplay ~0.2 FPS | from the runner's lines; no error, device removal or panic logged; seen as a crash by the maintainer |
 | 2026-11-27 | `b5efb43` | gameplay ~0.7 FPS (median 1,438.3 ms/frame) with the defaults (fallback on); ~0.9 FPS (1,076.4 ms/frame) with `VICTORY_TEXTURE_FROM_COPY=1` | measured by the maintainer with `ab.bat` (gameplay frame lines only, from 120 s on, one run each); slower than 2026-11-26; no errors, device removals or panics; sometimes missing textures (user-reported) |
