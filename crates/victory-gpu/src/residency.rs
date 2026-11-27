@@ -21,12 +21,46 @@ use windows::Win32::Graphics::Direct3D12::*;
 
 static STATE: Mutex<Option<Residency>> = Mutex::new(None);
 
-/// Whether the residency decisions are used (`VICTORY_RESIDENCY=0`: the
-/// inherited rule, no texture made past nine tenths of the budget, none
-/// given up early, none in the PC's memory). On by default.
+/// Whether the residency decisions are used (`VICTORY_RESIDENCY=1`). **Off
+/// by default** since 2026-11-27: the inherited rule, no texture made past
+/// nine tenths of the budget, none given up early, none in the PC's memory.
+///
+/// It was on by default from `009dd7a`. The first measurement on a title
+/// with it on (2026-11-27) had about 6 GiB of textures in the PC's memory,
+/// every part of the frame several times slower than the last measurement
+/// without it, and the frame at about a seventh of the earlier rate; so the
+/// default went back to the measured rule until an A/B on the title shows
+/// the fallback is worth it. With it on, a texture goes to the PC's memory
+/// only while the PC keeps physical memory free
+/// (`sixth_memory::residency::Policy::ram_reserve`).
 pub(crate) fn on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_RESIDENCY").is_none_or(|v| v != "0"))
+    *ON.get_or_init(|| std::env::var_os("VICTORY_RESIDENCY").is_some_and(|v| v != "0"))
+}
+
+/// Whether placement asks the residency decisions: when they are on, and in
+/// tests that force textures to the PC's memory ([`force_system`]).
+pub(crate) fn deciding() -> bool {
+    #[cfg(test)]
+    if FORCED.with(std::cell::Cell::get) {
+        return true;
+    }
+    on()
+}
+
+/// The PC's physical memory free now, in bytes (0 if the system does not
+/// say).
+pub(crate) fn ram_available() -> u64 {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status = MEMORYSTATUSEX {
+        dwLength: size_of::<MEMORYSTATUSEX>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: a plain query into our value, its length set.
+    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        return 0;
+    }
+    status.ullAvailPhys
 }
 
 /// Since the start: host textures made in the PC's memory for lack of room
@@ -56,6 +90,7 @@ pub(crate) fn budget() -> Option<Budget> {
         local_used,
         system_budget,
         system_used,
+        ram_available: ram_available(),
     })
 }
 

@@ -130,7 +130,7 @@ pub(crate) fn line(r: &Record, running_s: f64, longest_gap_us: u64) -> String {
     format!(
         "session: {} min {} s since the first present, {:.0} frames, {fps:.2} FPS average ({:.1} ms/frame), \
          worst second {:.2} FPS, longest time between two presents {:.2} s; {} of {} seconds with draws not run; \
-         {}, VRAM peak {:.2} GiB; display {}x{}{}; {}",
+         {}, VRAM peak {:.2} GiB, the PC's free memory at its lowest {}; display {}x{}{}; {}",
         (running_s / 60.0) as u64,
         (running_s % 60.0) as u64,
         r.frames,
@@ -141,6 +141,10 @@ pub(crate) fn line(r: &Record, running_s: f64, longest_gap_us: u64) -> String {
         r.windows,
         crate::host::adapter_text(),
         crate::sysprof::PEAK_VRAM.load(Ordering::Relaxed) as f64 / (1u64 << 30) as f64,
+        match crate::sysprof::LOWEST_RAM_FREE.load(Ordering::Relaxed) {
+            0 => "not read".to_owned(),
+            b => format!("{:.1} GiB", b as f64 / (1u64 << 30) as f64),
+        },
         res.display.0,
         res.display.1,
         res.output.map_or(String::new(), |(w, h)| format!(", output {w}x{h}, scale {}", res.scale)),
@@ -205,6 +209,7 @@ mod tests {
         assert!(line.contains("worst second 4.60 FPS"), "{line}");
         assert!(line.contains("longest time between two presents 2.40 s"), "{line}");
         assert!(line.contains("0 of 90 seconds with draws not run"), "{line}");
+        assert!(line.contains("the PC's free memory at its lowest "), "{line}");
     }
 
     /// On the real device the line names the GPU and its driver version.

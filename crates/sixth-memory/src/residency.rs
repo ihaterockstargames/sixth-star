@@ -35,6 +35,12 @@ pub struct Budget {
     pub local_used: u64,
     pub system_budget: u64,
     pub system_used: u64,
+    /// The PC's physical memory free now (0: not known). The shared
+    /// budget above is a share of all the PC's memory, not what is free:
+    /// the title's own memory and other programs take from the same RAM,
+    /// and a resource placed there when little is free makes the system
+    /// page (everything slows down, not only the GPU's reads).
+    pub ram_available: u64,
 }
 
 impl Budget {
@@ -93,6 +99,9 @@ pub enum Placement {
 pub enum Refusal {
     /// The card is past its target and the PC's shared memory is too.
     BothPoolsFull,
+    /// The card is past its target and the PC has too little physical
+    /// memory free to take it without paging.
+    RamLow,
 }
 
 /// A resource that eviction may consider, as the backend sees it now.
@@ -163,6 +172,9 @@ pub struct Policy {
     /// The PC's shared memory a resource may take as a fallback, as a share
     /// of its budget.
     pub system_target: f64,
+    /// The PC's physical memory that must stay free after a resource is
+    /// placed there (when the free memory is known).
+    pub ram_reserve: u64,
     /// Frames a streamed resource must have been idle to be evicted, at
     /// `High` (at `Critical`: one).
     pub idle_frames: u64,
@@ -176,6 +188,7 @@ impl Default for Policy {
             critical: 0.97,
             margin: 0.05,
             system_target: 0.75,
+            ram_reserve: 4 << 30,
             idle_frames: 4,
         }
     }
@@ -372,6 +385,8 @@ impl Residency {
             // The GPU writes it: in the card's memory whatever the
             // pressure (the system pages the card's memory if it must).
             Placement::Local
+        } else if budget.ram_available != 0 && budget.ram_available < bytes.saturating_add(p.ram_reserve) {
+            Placement::Refuse(Refusal::RamLow)
         } else if (budget.system_used.saturating_add(bytes) as f64) < budget.system_budget as f64 * p.system_target {
             Placement::System
         } else {
@@ -398,6 +413,7 @@ mod tests {
             local_used: local_used_tenths * GIB,
             system_budget: 16 * GIB,
             system_used: system_used_gib * GIB,
+            ram_available: 0,
         }
     }
 
@@ -407,6 +423,7 @@ mod tests {
             local_used: share_percent * GIB,
             system_budget: 16 * GIB,
             system_used: 0,
+            ram_available: 0,
         }
     }
 
@@ -479,6 +496,29 @@ mod tests {
         let all = r.evict(1 << 40, &candidates, 100, 30);
         assert_eq!(all, [3, 2, 1, 0, 7]);
         assert_eq!(r.stats.evicted, 2 + 3 + 5);
+    }
+
+    /// A texture goes to the PC's memory only while the PC has physical
+    /// memory free beyond the reserve: with less, it is refused (the
+    /// inherited wait) rather than making the system page. Unknown free
+    /// memory (0) does not refuse.
+    #[test]
+    fn the_pc_fallback_keeps_physical_memory_free() {
+        let mut r = Residency::default();
+        r.observe(&at(95));
+        let with_free = |gib: u64| Budget { ram_available: gib * GIB, ..at(95) };
+        assert_eq!(r.place(Class::Streamed, GIB, &with_free(12)), Placement::System);
+        assert_eq!(r.place(Class::Streamed, GIB, &with_free(5)), Placement::System, "5 GiB free: 1 GiB taken leaves the 4 GiB reserve");
+        assert_eq!(r.place(Class::Streamed, GIB, &with_free(4)), Placement::Refuse(Refusal::RamLow));
+        assert_eq!(r.place(Class::Read, 64 << 20, &with_free(3)), Placement::Refuse(Refusal::RamLow));
+        assert_eq!(r.place(Class::Streamed, GIB, &with_free(0)), Placement::System, "not known: the shared budget decides");
+        // A render target stays on the card whatever the PC has free.
+        assert_eq!(r.place(Class::Written, GIB, &with_free(1)), Placement::Local);
+        // With room on the card, the PC's memory does not matter.
+        let mut calm = Residency::default();
+        calm.observe(&at(50));
+        assert_eq!(calm.place(Class::Streamed, GIB, &Budget { ram_available: GIB, ..at(50) }), Placement::Local);
+        assert_eq!(r.stats.refused, 2);
     }
 
     #[test]

@@ -1972,7 +1972,7 @@ fn host_texture(
     };
     // SAFETY: a plain query; the description has the host layout.
     let bytes = unsafe { host.device.GetResourceAllocationInfo(0, &[std::ptr::from_ref(&d).cast::<D3D12_RESOURCE_DESC>().read()]) }.SizeInBytes;
-    let decided = if crate::residency::on() {
+    let decided = if crate::residency::deciding() {
         crate::residency::place(class, bytes)
     } else {
         sixth_memory::residency::Placement::Local

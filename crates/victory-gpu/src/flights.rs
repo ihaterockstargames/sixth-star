@@ -1523,6 +1523,9 @@ fn writes_back_and_title_writes_both_reach_whichever_copy_is_read() {
 /// the texture comes back to the card and the hot copies move. Ignored:
 /// filling the card would change what other tests running beside it see.
 /// Run with `cargo test -p victory-gpu --release --lib pressure_stress -- --ignored --nocapture`.
+/// The texture fallback is off by default (`crate::residency::on`): run it
+/// with `VICTORY_RESIDENCY=1` as well to check the fallback; without, the
+/// texture is made on the card as the inherited rule makes it.
 #[test]
 #[ignore = "fills the card's memory"]
 fn pressure_stress() {
@@ -1549,10 +1552,13 @@ fn pressure_stress() {
     let (need, pressure) = crate::residency::need();
     println!("filled: {:.0}% ({used} MiB, {} pieces), pressure {pressure:?}, {} MiB to give up", full * 100.0, filler.len(), need >> 20);
     assert!(pressure >= sixth_memory::residency::Pressure::High);
-    // A texture the title fills: made, in the PC's memory.
+    // A texture the title fills: made; in the PC's memory with the
+    // fallback, on the card (the inherited rule) without.
+    let fallback = crate::residency::on();
+    println!("texture fallback (VICTORY_RESIDENCY): {}", if fallback { "on" } else { "off, the default" });
     let texture = crate::resource::tests::placed_rgba();
     let first = crate::resource::host_resource(texture).expect("made under pressure, not refused").clone();
-    assert!(crate::residency::in_system(&first), "in the PC's memory while the card is full");
+    assert_eq!(crate::residency::in_system(&first), fallback, "in the PC's memory while the card is full only with the fallback");
     // Hot copies do not move up while the card is full.
     const LEN: usize = 4 << 20;
     // SAFETY: a fresh write-watched reservation of our own, never freed.
@@ -1586,10 +1592,13 @@ fn pressure_stress() {
     }
     let (after, used, _) = share();
     println!("released: {:.0}% ({used} MiB), pressure {:?}", after * 100.0, crate::residency::need().1);
-    // The texture comes back to the card.
-    assert!(crate::resource::promote_idle(0, 0) >= 1, "given up in the PC's memory");
+    // The texture comes back to the card (with the fallback; without, it
+    // never left).
+    if fallback {
+        assert!(crate::resource::promote_idle(0, 0) >= 1, "given up in the PC's memory");
+    }
     let back = crate::resource::host_resource(texture).expect("made again").clone();
-    assert!(!crate::residency::in_system(&back), "back on the card");
+    assert!(!crate::residency::in_system(&back), "on the card");
     // The hot copies move now.
     let mut moved = 0;
     for f in 12..24 {
@@ -1836,4 +1845,176 @@ fn synthetic_ab() {
     std::fs::write(&path, out.join("\n") + "\n").expect("the report written");
     println!("report: {path}");
     let _ = host;
+}
+
+/// Synthetic: does the GPU reading from the PC's memory slow the CPU's own
+/// memory work? On the title (2026-11-27), with about 6 GiB of textures in
+/// the PC's memory, not only the GPU's part of the frame grew but also the
+/// CPU's preparing and copy-back, several times over. Both use the PC's
+/// memory: the GPU over the bus, the CPU directly. This measures the CPU's
+/// copy rate (four threads, 128 MiB each, as copy-back and refreshes copy)
+/// alone, while the GPU reads 1 GiB in the PC's memory over and over, and
+/// while it reads 1 GiB on the card instead (the control: a busy GPU that
+/// does not touch the PC's memory). Prints a table; run with
+/// `cargo test -p victory-gpu --release --lib pcie_contention_bench -- --ignored --nocapture`.
+#[test]
+#[ignore = "a benchmark (about half a minute, 3 GiB of memory)"]
+fn pcie_contention_bench() {
+    use windows::Win32::Graphics::Direct3D12::*;
+    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+    use windows::core::Interface;
+    let Some(host) = crate::host::host() else {
+        return;
+    };
+    const SRC: u64 = 1 << 30;
+    const CHUNK: u64 = 64 << 20;
+    let device: &ID3D12Device = &host.device;
+    // SAFETY: object creation on the host's device.
+    let (root, pipeline, queue, fence) = unsafe {
+        let shader = "ByteAddressBuffer t : register(t0); RWByteAddressBuffer o : register(u0);
+             [numthreads(256, 1, 1)] void main(uint3 id : SV_DispatchThreadID) {
+                 uint4 v = t.Load4(id.x * 16);
+                 if ((v.x ^ v.y ^ v.z ^ v.w) == 0x9e3779b9u) o.Store((id.x & 0x3fff) * 4, v.x);
+             }";
+        let code = crate::host::compile(shader, windows::core::s!("main"), windows::core::s!("cs_5_1")).expect("compiled");
+        let params = [
+            D3D12_ROOT_PARAMETER {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_SRV,
+                Anonymous: D3D12_ROOT_PARAMETER_0 { Descriptor: D3D12_ROOT_DESCRIPTOR { ShaderRegister: 0, RegisterSpace: 0 } },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            },
+            D3D12_ROOT_PARAMETER {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_UAV,
+                Anonymous: D3D12_ROOT_PARAMETER_0 { Descriptor: D3D12_ROOT_DESCRIPTOR { ShaderRegister: 0, RegisterSpace: 0 } },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            },
+        ];
+        let desc = D3D12_ROOT_SIGNATURE_DESC { NumParameters: 2, pParameters: params.as_ptr(), ..Default::default() };
+        let mut blob = None;
+        D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &mut blob, None).expect("root signature");
+        let blob = blob.expect("blob");
+        let root: ID3D12RootSignature = device
+            .CreateRootSignature(0, std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize()))
+            .expect("root");
+        let pipeline: ID3D12PipelineState = device
+            .CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                pRootSignature: std::mem::transmute_copy(&root),
+                CS: D3D12_SHADER_BYTECODE { pShaderBytecode: code.as_ptr().cast(), BytecodeLength: code.len() },
+                ..Default::default()
+            })
+            .expect("pipeline");
+        let queue: ID3D12CommandQueue = device
+            .CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC { Type: D3D12_COMMAND_LIST_TYPE_COMPUTE, ..Default::default() })
+            .expect("a queue of our own");
+        let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE).expect("fence");
+        (root, pipeline, queue, fence)
+    };
+    let (system, at) = host.upload_buffer(SRC).expect("1 GiB in the PC's memory");
+    // SAFETY: the mapped upload buffer is SRC bytes long; written once so its
+    // pages are in RAM, not untouched commit.
+    unsafe { std::ptr::write_bytes(at, 0x5a, SRC as usize) };
+    let card = host.uav_buffer(SRC).expect("1 GiB on the card");
+    let out = host.uav_buffer(64 << 10).expect("out");
+    let value = std::cell::Cell::new(0u64);
+    // Starts `passes` reads of the whole of `source` on the GPU; returns a
+    // waiter for their end, which gives the time they took.
+    let run = |source: &ID3D12Resource, passes: u32| {
+        // SAFETY: recording on objects of our own; the allocator and list
+        // live in the waiter until the GPU is done with them.
+        unsafe {
+            let allocator: ID3D12CommandAllocator = device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE).expect("allocator");
+            let list: ID3D12GraphicsCommandList =
+                device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, &allocator, &pipeline).expect("list");
+            list.SetComputeRootSignature(&root);
+            for _ in 0..passes {
+                for chunk in 0..SRC / CHUNK {
+                    list.SetComputeRootShaderResourceView(0, source.GetGPUVirtualAddress() + chunk * CHUNK);
+                    list.SetComputeRootUnorderedAccessView(1, out.GetGPUVirtualAddress());
+                    list.Dispatch((CHUNK / 16 / 256) as u32, 1, 1);
+                }
+            }
+            list.Close().expect("closed");
+            let started = std::time::Instant::now();
+            queue.ExecuteCommandLists(&[Some(list.cast::<ID3D12CommandList>().expect("a command list"))]);
+            value.set(value.get() + 1);
+            queue.Signal(&fence, value.get()).expect("signal");
+            let target = value.get();
+            let fence = fence.clone();
+            move || {
+                let event = CreateEventW(None, false, false, None).expect("event");
+                fence.SetEventOnCompletion(target, event).expect("on completion");
+                WaitForSingleObject(event, u32::MAX);
+                let _ = windows::Win32::Foundation::CloseHandle(event);
+                drop((allocator, list));
+                started.elapsed()
+            }
+        }
+    };
+    // The CPU's copy rate over `seconds`: four threads, each copying 128 MiB
+    // of its own, already in RAM.
+    let cpu_rate = |seconds: f64| {
+        let begun = std::time::Instant::now();
+        let deadline = begun + std::time::Duration::from_secs_f64(seconds);
+        let copied: u64 = std::thread::scope(|s| {
+            let workers: Vec<_> = (0..4)
+                .map(|_| {
+                    s.spawn(move || {
+                        let src = vec![7u8; 128 << 20];
+                        let mut dst = vec![0u8; 128 << 20];
+                        dst.copy_from_slice(&src);
+                        let mut n = 0u64;
+                        while std::time::Instant::now() < deadline {
+                            dst.copy_from_slice(&src);
+                            std::hint::black_box(&mut dst);
+                            n += src.len() as u64;
+                        }
+                        n
+                    })
+                })
+                .collect();
+            workers.into_iter().map(|w| w.join().expect("a copier")).sum()
+        });
+        copied as f64 / begun.elapsed().as_secs_f64() / 1e9
+    };
+    // The GPU's read rates alone, to size its loads to about three seconds.
+    let rate = |d: std::time::Duration, passes: u32| f64::from(passes) * SRC as f64 / d.as_secs_f64() / 1e9;
+    let pc_alone = rate(run(&system, 2)(), 2);
+    let card_alone = rate(run(&card, 8)(), 8);
+    let pc_passes = ((3.0 * pc_alone).ceil() as u32).clamp(2, 400);
+    let card_passes = ((3.0 * card_alone).ceil() as u32).clamp(8, 2000);
+    let cpu_alone = [cpu_rate(1.0), cpu_rate(1.0), cpu_rate(1.0)];
+    let mut with_pc = Vec::new();
+    let mut with_card = Vec::new();
+    let mut pc_under = Vec::new();
+    for _ in 0..3 {
+        let wait = run(&system, pc_passes);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        with_pc.push(cpu_rate(1.0));
+        pc_under.push(rate(wait(), pc_passes));
+        let wait = run(&card, card_passes);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        with_card.push(cpu_rate(1.0));
+        let _ = wait();
+    }
+    let median = |v: &[f64]| {
+        let mut v = v.to_vec();
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    let alone = median(&cpu_alone);
+    let (pc, card_case) = (median(&with_pc), median(&with_card));
+    println!("| the GPU meanwhile | CPU copy rate, GB/s (4 threads) | against the CPU alone | the GPU's read rate, GB/s |");
+    println!("|---|---|---|---|");
+    println!("| idle | {alone:.1} | (the reference) | - |");
+    println!("| reads 1 GiB on the card | {card_case:.1} | {:+.0}% | {card_alone:.0} alone |", (card_case / alone - 1.0) * 100.0);
+    println!(
+        "| reads 1 GiB in the PC's memory | {pc:.1} | {:+.0}% | {pc_alone:.1} alone, {:.1} while the CPU copies (3 s of reads, 1 s of copies) |",
+        (pc / alone - 1.0) * 100.0,
+        median(&pc_under)
+    );
+    println!(
+        "CONTENTION-ROW {alone:.2}|{card_case:.2}|{pc:.2}|{pc_alone:.2}|{:.2}|{card_alone:.1}",
+        median(&pc_under)
+    );
+    drop((system, card, out));
 }

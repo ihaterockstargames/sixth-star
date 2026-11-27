@@ -2,7 +2,7 @@
 # configuration, stops each run after a fixed time, reads the runtime's own
 # telemetry from each run's log and writes one comparison report.
 #
-#   ab.bat                                   baseline, best, bestlate, hot1024, cardbuf1
+#   ab.bat                                   baseline, resid, best, hot1024, cardbuf1
 #   ab.bat -Configs baseline,hot512,hot2048 -Seconds 420 -SkipSeconds 180
 #   ab.bat -ParseOnly logs\run_20261126_230000.log,logs\run_20261126_231000.log
 #   ab.bat -Stability                        one run of 33 minutes (baseline, or the
@@ -27,7 +27,11 @@
 #   bestlate       best with VICTORY_LATE_WAIT=3
 #   wide           VICTORY_WIDE_REFRESH=1 (refreshes on several threads)
 #   keepsnap       VICTORY_KEEP_SNAPSHOTS=1
-#   noresidency    VICTORY_RESIDENCY=0 (the inherited texture rule)
+#   resid          VICTORY_RESIDENCY=1 (textures that find no room on the card go
+#                  to the PC's memory; the default from 009dd7a until 2026-11-27,
+#                  when the first title run with it was several times slower)
+#   noresidency    VICTORY_RESIDENCY=0 (the inherited texture rule; the default
+#                  again since 2026-11-27)
 #   nopromote      VICTORY_PROMOTE=0
 #   nonote         VICTORY_BACK_NOTE=0 (copy-back pages copied again, as before bb57383)
 #   relay          VICTORY_RELAY=1 (asynchronous copy-back; experimental)
@@ -40,12 +44,17 @@
 # Nothing here reads anything but the logs the runs write.
 [CmdletBinding()]
 param(
-    [string[]]$Configs = @('baseline', 'best', 'bestlate', 'hot1024', 'cardbuf1'),
+    [string[]]$Configs = @('baseline', 'resid', 'best', 'hot1024', 'cardbuf1'),
     # How long each run lasts, from its start (loading included).
     [int]$Seconds = 300,
     # Frame lines before this many seconds after the first one are not
     # counted (loading, the menu, getting into the same scene).
     [int]$SkipSeconds = 120,
+    # Only frame lines with at least this many draws per frame count as
+    # gameplay: menus and loading screens draw a few dozen (13 in the
+    # 2026-11-27 runs at 30 FPS), gameplay well over a thousand. The other
+    # lines of the runtime (GPU, VRAM) count with the frame line nearest them.
+    [int]$MinDraws = 200,
     # The settings file (default: run.config.bat next to run.bat).
     [string]$Config = '',
     # Where the logs and the report go (default: logs\ab_<time> next to the settings).
@@ -73,6 +82,7 @@ function Get-Overrides([string]$name) {
     switch -Regex ($name) {
         '^baseline$' { return [ordered]@{} }
         '^hot(\d+|auto)$' { return [ordered]@{ VICTORY_HOT_WINDOWS_MB = $Matches[1] } }
+        '^resid$' { return [ordered]@{ VICTORY_RESIDENCY = '1' } }
         '^noresidency$' { return [ordered]@{ VICTORY_RESIDENCY = '0' } }
         '^nopromote$' { return [ordered]@{ VICTORY_PROMOTE = '0' } }
         '^nonote$' { return [ordered]@{ VICTORY_BACK_NOTE = '0' } }
@@ -120,6 +130,7 @@ function Read-Run([string]$log) {
         Vram = New-Object System.Collections.Generic.List[object]
         Residency = $null; Memory = $null; Session = $null; Startup = $null; Cpu = $null; Exit = $null
         SessionS = $null; SessionFrames = $null; SessionFps = $null; SessionMs = $null; WorstFps = $null; LongestGap = $null; NotRun = $null
+        LowestRamFree = $null; MenuLines = 0
         FirstError = $null
     }
     $first = $null
@@ -144,9 +155,15 @@ function Read-Run([string]$log) {
             $r.Gpu.Add([pscustomobject]@{ T = $t; Title = [double]$Matches[1]; Ours = [double]$Matches[2]; Busy = [double]$Matches[3]; Wall = [double]$Matches[4] })
         }
         if ($line -match 'VRAM ([\d.]+) of ([\d.]+) GiB budget \((\d+)%\), shared GPU memory ([\d.]+) of ([\d.]+) GiB') {
-            $v = [ordered]@{ T = $t; Used = [double]$Matches[1]; Budget = [double]$Matches[2]; Shared = [double]$Matches[4]; Cores = $null; Submitter = $null }
+            $v = [ordered]@{ T = $t; Used = [double]$Matches[1]; Budget = [double]$Matches[2]; Shared = [double]$Matches[4]; Cores = $null; Submitter = $null
+                RamFree = $null; RamTotal = $null; Commit = $null; CommitLimit = $null; Private = $null; WorkingSet = $null; Faults = $null }
             if ($line -match 'the process kept ([\d.]+) of (\d+) logical cores busy') { $v.Cores = [double]$Matches[1] }
             if ($line -match 'the submitting thread \(\d+\) was busy (\d+)%') { $v.Submitter = [double]$Matches[1] }
+            if ($line -match 'the PC''s memory: ([\d.]+) of ([\d.]+) GiB in use, ([\d.]+) GiB free; the system''s commit ([\d.]+) of ([\d.]+) GiB; this process committed ([\d.]+) GiB, ([\d.]+) GiB of it in RAM') {
+                $v.RamTotal = [double]$Matches[2]; $v.RamFree = [double]$Matches[3]; $v.Commit = [double]$Matches[4]; $v.CommitLimit = [double]$Matches[5]
+                $v.Private = [double]$Matches[6]; $v.WorkingSet = [double]$Matches[7]
+            }
+            if ($line -match '([\d.]+) page faults/s') { $v.Faults = [double]$Matches[1] }
             $r.Vram.Add([pscustomobject]$v)
         }
         if ($line -match '(residency: .*)$') { $r.Residency = $Matches[1] }
@@ -162,6 +179,7 @@ function Read-Run([string]$log) {
                 $r.LongestGap = [double]$Matches[7]
                 $r.NotRun = "$($Matches[8]) of $($Matches[9])"
             }
+            if ($r.Session -match 'the PC''s free memory at its lowest ([\d.]+) GiB') { $r.LowestRamFree = [double]$Matches[1] }
         }
         if ($line -match '(startup: .*)$') { $r.Startup = $Matches[1] }
         if ($line -match '(CPU time per frame in measured work.*)$') { $r.Cpu = $Matches[1] }
@@ -174,14 +192,31 @@ function Read-Run([string]$log) {
     # The frame lines counted: from SkipSeconds after the first one (by the
     # log's clock), or the last two thirds when the lines carry no time.
     $counted = @()
+    $late = $frames.ToArray()
     if ($first) {
         $from = $first.AddSeconds($SkipSeconds)
-        $counted = @($frames | Where-Object { $_.T -and $_.T -ge $from })
+        $late = @($frames | Where-Object { $_.T -and $_.T -ge $from })
     }
-    if ($counted.Count -eq 0 -and $frames.Count -gt 0) {
-        $counted = @($frames | Select-Object -Last ([math]::Max(1, [int]($frames.Count * 2 / 3))))
+    if ($late.Count -eq 0 -and $frames.Count -gt 0 -and -not $first) {
+        $late = @($frames | Select-Object -Last ([math]::Max(1, [int]($frames.Count * 2 / 3))))
     }
+    # Gameplay only: the frame lines that draw like a scene, not a menu.
+    $counted = @($late | Where-Object { $_.Draws -ge $MinDraws })
+    $r.MenuLines = $late.Count - $counted.Count
     $r.Counted = $counted.Count
+    # Another line of the runtime counts when the frame line nearest it in
+    # time is counted (they are written in the same batches).
+    $timed = @($frames.ToArray() | Where-Object { $_.T })
+    $inGameplay = {
+        param($t)
+        if (-not $t -or $timed.Count -eq 0) { return $true }
+        $best = $null; $gap = [double]::MaxValue
+        foreach ($f in $timed) {
+            $d = [math]::Abs(($f.T - $t).TotalSeconds)
+            if ($d -lt $gap) { $gap = $d; $best = $f }
+        }
+        return ($counted -contains $best)
+    }
     # The frame time over the run, by 30 seconds from the first frame line:
     # where loading and menus end and the scene begins.
     $r.Series = ''
@@ -198,18 +233,21 @@ function Read-Run([string]$log) {
         Draws = & $m 'Draws'; Dropped = & $m 'Dropped'
     }
     $r.WorstMs = if ($counted.Count) { ($counted | Measure-Object Ms -Maximum).Maximum } else { $null }
-    $gpu = @($r.Gpu | Where-Object { -not $first -or ($_.T -and $_.T -ge $first.AddSeconds($SkipSeconds)) })
+    $gpu = @($r.Gpu | Where-Object { (-not $first -or ($_.T -and $_.T -ge $first.AddSeconds($SkipSeconds))) -and (& $inGameplay $_.T) })
     $r.GpuMedian = [ordered]@{
         Title = Get-Median (@($gpu | ForEach-Object Title)); Ours = Get-Median (@($gpu | ForEach-Object Ours))
         Busy = Get-Median (@($gpu | ForEach-Object Busy)); Wall = Get-Median (@($gpu | ForEach-Object Wall))
     }
-    $vr = @($r.Vram | Where-Object { -not $first -or ($_.T -and $_.T -ge $first.AddSeconds($SkipSeconds)) })
+    $vr = @($r.Vram | Where-Object { (-not $first -or ($_.T -and $_.T -ge $first.AddSeconds($SkipSeconds))) -and (& $inGameplay $_.T) })
+    $med = { param($p) Get-Median (@($vr | Where-Object { $null -ne $_.$p } | ForEach-Object { $_.$p })) }
     $r.VramMedian = [ordered]@{
-        Used = Get-Median (@($vr | ForEach-Object Used)); Budget = Get-Median (@($vr | ForEach-Object Budget))
-        Shared = Get-Median (@($vr | ForEach-Object Shared))
-        Cores = Get-Median (@($vr | Where-Object { $null -ne $_.Cores } | ForEach-Object Cores))
-        Submitter = Get-Median (@($vr | Where-Object { $null -ne $_.Submitter } | ForEach-Object Submitter))
+        Used = & $med 'Used'; Budget = & $med 'Budget'; Shared = & $med 'Shared'
+        Cores = & $med 'Cores'; Submitter = & $med 'Submitter'
+        RamFree = & $med 'RamFree'; RamTotal = & $med 'RamTotal'; Commit = & $med 'Commit'; CommitLimit = & $med 'CommitLimit'
+        Private = & $med 'Private'; WorkingSet = & $med 'WorkingSet'; Faults = & $med 'Faults'
     }
+    $free = @($r.Vram | Where-Object { $null -ne $_.RamFree } | ForEach-Object RamFree)
+    $r.RamFreeLowest = if ($free.Count) { ($free | Measure-Object -Minimum).Minimum } else { $r.LowestRamFree }
     $r.VramPeak = if ($r.Vram.Count) { ($r.Vram | Measure-Object Used -Maximum).Maximum } else { $null }
     $r.IncompleteLast = if ($r.Incomplete.Count) { $r.Incomplete[$r.Incomplete.Count - 1] } else { 0 }
     return [pscustomobject]$r
@@ -221,7 +259,7 @@ function Write-Report($runs, [string]$path, $info) {
     $out = New-Object System.Collections.Generic.List[string]
     $out.Add('# Sixth Star A/B report')
     $out.Add('')
-    $out.Add("Written $(Get-Date -Format 'yyyy-MM-dd HH:mm'). Each figure is the median of the frame lines counted (from $SkipSeconds s after the first frame line). Approximate; one machine, one run each.")
+    $out.Add("Written $(Get-Date -Format 'yyyy-MM-dd HH:mm'). Each figure is the median of the gameplay frame lines: from $SkipSeconds s after the first frame line, and only lines with at least $MinDraws draws per frame (menus and loading screens draw far fewer and are left out). The runtime's other lines count with the frame line nearest them. Approximate; one machine, one run each.")
     $out.Add('')
     foreach ($k in $info.Keys) { $out.Add("- ${k}: $($info[$k])") }
     $out.Add('')
@@ -230,7 +268,7 @@ function Write-Report($runs, [string]$path, $info) {
     $out.Add('|---|' + (($runs | ForEach-Object { '---' }) -join '|') + '|')
     $rows = @(
         @('Settings', { param($x) if ($x.Overrides.Count) { ($x.Overrides.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' ' } else { 'defaults' } }),
-        @('Frame lines counted (of all)', { param($x) "$($x.Run.Counted) of $($x.Run.FrameLines)" }),
+        @('Gameplay frame lines counted (of all; menu or loading lines left out)', { param($x) "$($x.Run.Counted) of $($x.Run.FrameLines) ($($x.Run.MenuLines) left out)" }),
         @('FPS', { param($x) F $x.Run.Median.Fps '{0:N2}' }),
         @('ms/frame', { param($x) F $x.Run.Median.Ms }),
         @('  against the first configuration', { param($x)
@@ -252,6 +290,10 @@ function Write-Report($runs, [string]$path, $info) {
         @('INCOMPLETE FRAMES (lines; last per frame)', { param($x) "$($x.Run.Incomplete.Count); $(F $x.Run.IncompleteLast)" }),
         @('VRAM used of budget, GiB (peak)', { param($x) "$(F $x.Run.VramMedian.Used '{0:N2}') of $(F $x.Run.VramMedian.Budget '{0:N2}') ($(F $x.Run.VramPeak '{0:N2}'))" }),
         @('shared GPU memory, GiB', { param($x) F $x.Run.VramMedian.Shared '{0:N2}' }),
+        @('the PC''s memory free, GiB (lowest of the run)', { param($x) "$(F $x.Run.VramMedian.RamFree) ($(F $x.Run.RamFreeLowest)) of $(F $x.Run.VramMedian.RamTotal)" }),
+        @('the system''s commit of its limit, GiB', { param($x) "$(F $x.Run.VramMedian.Commit) of $(F $x.Run.VramMedian.CommitLimit)" }),
+        @('the process: committed / in RAM, GiB', { param($x) "$(F $x.Run.VramMedian.Private '{0:N2}') / $(F $x.Run.VramMedian.WorkingSet '{0:N2}')" }),
+        @('page faults/s (process)', { param($x) F $x.Run.VramMedian.Faults '{0:N0}' }),
         @('cores busy (process)', { param($x) F $x.Run.VramMedian.Cores '{0:N2}' }),
         @('submitting thread busy, %', { param($x) F $x.Run.VramMedian.Submitter '{0:N0}' }),
         @('watchdog lines (stalls)', { param($x) "$($x.Run.Watchdog)" }),
@@ -259,7 +301,7 @@ function Write-Report($runs, [string]$path, $info) {
         @('ran, s (exit code)', { param($x) "$(F $x.Seconds '{0:N0}') ($(if ($null -ne $x.Run.Exit) { $x.Run.Exit } else { 'n/a' }))" }),
         @('how it ended', { param($x) if ($x.Stopped) { 'ran the full time, stopped by the script: no crash' } elseif ($null -eq $x.Stopped) { 'n/a (log read only)' } else { 'ended by itself before the time was up: a crash or an exit' } }),
         @('session line: length since the first frame', { param($x) if ($null -ne $x.Run.SessionS) { '{0} min {1} s' -f [int][math]::Floor($x.Run.SessionS / 60), ($x.Run.SessionS % 60) } else { 'no session line' } }),
-        @('session line: FPS average (ms/frame)', { param($x) if ($null -ne $x.Run.SessionFps) { '{0:N2} ({1:N1})' -f $x.Run.SessionFps, $x.Run.SessionMs } else { 'n/a' } }),
+        @('session line: FPS average (ms/frame), menus included', { param($x) if ($null -ne $x.Run.SessionFps) { '{0:N2} ({1:N1})' -f $x.Run.SessionFps, $x.Run.SessionMs } else { 'n/a' } }),
         @('session line: worst second, longest freeze', { param($x) if ($null -ne $x.Run.WorstFps) { '{0:N2} FPS, {1:N2} s' -f $x.Run.WorstFps, $x.Run.LongestGap } else { 'n/a' } }),
         @('session line: seconds with draws not run', { param($x) if ($x.Run.NotRun) { $x.Run.NotRun } else { 'n/a' } })
     )
@@ -280,17 +322,22 @@ function Write-Report($runs, [string]$path, $info) {
     # What STATUS.md can say, from the session lines only (measured, not
     # estimated): one line per run that wrote one.
     $out.Add('')
-    $out.Add('## For STATUS.md (measured by the runner''s session line)')
+    $out.Add('## For STATUS.md (gameplay from the frame lines; session length from the session line)')
     $out.Add('')
     foreach ($x in $runs) {
+        $settings = if ($x.Overrides.Count) { ($x.Overrides.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ' } else { 'default settings' }
+        $game = if ($x.Run.Counted -gt 0) {
+            "gameplay $('{0:N2}' -f $x.Run.Median.Fps) FPS ($('{0:N1}' -f $x.Run.Median.Ms) ms/frame), the median of $($x.Run.Counted) frame lines with at least $MinDraws draws per frame"
+        } else {
+            "no gameplay measured (no frame line with at least $MinDraws draws per frame after $SkipSeconds s: menus or loading only)"
+        }
         if ($null -eq $x.Run.SessionS) {
-            $out.Add("- $($x.Name): no session line in the log (the run ended before a minute of frames).")
+            $out.Add("- $($x.Name) ($settings): $game; no session line in the log (the run ended before a minute of frames).")
             continue
         }
         $len = '{0} min {1} s' -f [int][math]::Floor($x.Run.SessionS / 60), ($x.Run.SessionS % 60)
-        $ended = if ($x.Stopped) { 'without a crash (the run was stopped by the A/B script when its time was up)' } elseif ($null -eq $x.Stopped) { '(how the run ended is not known from the log alone)' } else { 'and then the run ended by itself (crash or exit; see the log)' }
-        $settings = if ($x.Overrides.Count) { ($x.Overrides.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ' } else { 'default settings' }
-        $out.Add("- $(Get-Date -Format 'yyyy-MM-dd'), build $($info['commit']), $settings`: a session of at least $len after the first frame $ended; $('{0:N2}' -f $x.Run.SessionFps) FPS average ($('{0:N1}' -f $x.Run.SessionMs) ms/frame) over the session, worst second $('{0:N2}' -f $x.Run.WorstFps) FPS, longest time between two presents $('{0:N2}' -f $x.Run.LongestGap) s, draws not run in $($x.Run.NotRun) seconds. Measured by the maintainer from the runner's session line (logged every minute, so the session ran up to a minute longer).")
+        $ended = if ($x.Stopped) { 'without a crash (the run was stopped by the A/B script when its time was up)' } elseif ($null -eq $x.Stopped) { '(how the run ended is not known from the log alone)' } else { 'and then the run ended by itself (crash, exit or closed by hand)' }
+        $out.Add("- $(Get-Date -Format 'yyyy-MM-dd'), build $($info['commit']), $settings`: $game; a session of at least $len after the first frame $ended, worst second $('{0:N2}' -f $x.Run.WorstFps) FPS, longest time between two presents $('{0:N2}' -f $x.Run.LongestGap) s. The session line's average ($('{0:N2}' -f $x.Run.SessionFps) FPS) counts the menus too and is not a gameplay figure. Measured by the maintainer from the runner's own lines.")
     }
     $out.Add('')
     $out.Add('Send this file back as it is. It holds no paths but the logs'' and no game data.')
