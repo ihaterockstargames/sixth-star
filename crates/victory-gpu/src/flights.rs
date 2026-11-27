@@ -2018,3 +2018,174 @@ fn pcie_contention_bench() {
     );
     drop((system, card, out));
 }
+
+/// Synthetic: does making pipelines on worker threads hold up the thread
+/// that records and submits? On the title (2026-11-27, the stability run)
+/// gameplay frames took 5.5 s while the process kept 7 cores busy and 1,443
+/// draws per frame waited for their pipelines. This measures, on the host's
+/// device, the submitting thread's loop (record a small dispatch, submit,
+/// wait for it) alone and while 2, 4 or 8 threads at the workers' priority
+/// make pipelines from shaders the driver has never seen (each one unique,
+/// so its compiler runs). Prints a table; run with
+/// `cargo test -p victory-gpu --release --lib pipeline_contention_bench -- --ignored --nocapture`.
+#[test]
+#[ignore = "a benchmark (a minute or two)"]
+fn pipeline_contention_bench() {
+    use windows::Win32::Graphics::Direct3D12::*;
+    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+    use windows::core::Interface;
+    let Some(host) = crate::host::host() else {
+        return;
+    };
+    let device: ID3D12Device = host.device.clone();
+    // A tag unique to this run, so that no shader below is in the driver's
+    // cache from an earlier run.
+    let tag = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) as u32;
+    let source = |k: u32| {
+        format!(
+            "RWByteAddressBuffer o : register(u0);
+             [numthreads(64, 1, 1)] void main(uint3 id : SV_DispatchThreadID) {{
+                 float4 a = float4(id.x, {k}.0, 1.0, 2.0);
+                 [unroll] for (int i = 0; i < 96; i++) {{ a = a * 1.0001f + sin(a.yzwx * {k}.0e-9 + i); }}
+                 o.Store(id.x * 4, asuint(a.x + a.y + a.z + a.w + {tag}.0));
+             }}"
+        )
+    };
+    // SAFETY: object creation on the host's device.
+    let (root, small, queue, fence) = unsafe {
+        let params = [D3D12_ROOT_PARAMETER {
+            ParameterType: D3D12_ROOT_PARAMETER_TYPE_UAV,
+            Anonymous: D3D12_ROOT_PARAMETER_0 { Descriptor: D3D12_ROOT_DESCRIPTOR { ShaderRegister: 0, RegisterSpace: 0 } },
+            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+        }];
+        let desc = D3D12_ROOT_SIGNATURE_DESC { NumParameters: 1, pParameters: params.as_ptr(), ..Default::default() };
+        let mut blob = None;
+        D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &mut blob, None).expect("root signature");
+        let blob = blob.expect("blob");
+        let root: ID3D12RootSignature = device
+            .CreateRootSignature(0, std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize()))
+            .expect("root");
+        let code = crate::host::compile(
+            "RWByteAddressBuffer o : register(u0); [numthreads(64, 1, 1)] void main(uint3 id : SV_DispatchThreadID) { o.Store(id.x * 4, id.x); }",
+            windows::core::s!("main"),
+            windows::core::s!("cs_5_1"),
+        )
+        .expect("compiled");
+        let small: ID3D12PipelineState = device
+            .CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                pRootSignature: std::mem::transmute_copy(&root),
+                CS: D3D12_SHADER_BYTECODE { pShaderBytecode: code.as_ptr().cast(), BytecodeLength: code.len() },
+                ..Default::default()
+            })
+            .expect("pipeline");
+        let queue: ID3D12CommandQueue = device
+            .CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC { Type: D3D12_COMMAND_LIST_TYPE_DIRECT, ..Default::default() })
+            .expect("a queue of our own");
+        let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE).expect("fence");
+        (root, small, queue, fence)
+    };
+    let out = host.uav_buffer(64 << 10).expect("out");
+    // Unique shaders, compiled before anything is measured: 48 per maker.
+    let mut next = 0u32;
+    let mut batch = |n: usize| {
+        (0..n)
+            .map(|_| {
+                next += 1;
+                crate::host::compile(&source(next), windows::core::s!("main"), windows::core::s!("cs_5_1")).expect("compiled")
+            })
+            .collect::<Vec<_>>()
+    };
+    // One make of a pipeline from `code`, its time.
+    let make = |device: &ID3D12Device, root: &ID3D12RootSignature, code: &[u8]| {
+        let began = std::time::Instant::now();
+        // SAFETY: creation on the device; the root outlives the call.
+        let made: windows::core::Result<ID3D12PipelineState> = unsafe {
+            device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                pRootSignature: std::mem::transmute_copy(root),
+                CS: D3D12_SHADER_BYTECODE { pShaderBytecode: code.as_ptr().cast(), BytecodeLength: code.len() },
+                ..Default::default()
+            })
+        };
+        made.expect("a pipeline");
+        began.elapsed()
+    };
+    // The submitting thread's loop for as long as `busy` holds: per turn,
+    // the time to record and submit, and the whole turn with the wait.
+    let submit_loop = |busy: &dyn Fn() -> bool, at_least: std::time::Duration| {
+        let mut submit = Vec::new();
+        let mut turn = Vec::new();
+        let mut value = 0u64;
+        let begun = std::time::Instant::now();
+        // SAFETY: objects of our own; each list is waited for before the
+        // allocator is reset.
+        unsafe {
+            let allocator: ID3D12CommandAllocator = device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT).expect("allocator");
+            let list: ID3D12GraphicsCommandList =
+                device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, &small).expect("list");
+            list.Close().expect("closed");
+            let event = CreateEventW(None, false, false, None).expect("event");
+            while busy() || begun.elapsed() < at_least {
+                let t0 = std::time::Instant::now();
+                allocator.Reset().expect("reset");
+                list.Reset(&allocator, &small).expect("list reset");
+                list.SetComputeRootSignature(&root);
+                list.SetComputeRootUnorderedAccessView(0, out.GetGPUVirtualAddress());
+                list.Dispatch(16, 1, 1);
+                list.Close().expect("closed");
+                queue.ExecuteCommandLists(&[Some(list.cast::<ID3D12CommandList>().expect("a command list"))]);
+                value += 1;
+                queue.Signal(&fence, value).expect("signal");
+                submit.push(t0.elapsed().as_secs_f64() * 1e3);
+                fence.SetEventOnCompletion(value, event).expect("on completion");
+                WaitForSingleObject(event, u32::MAX);
+                turn.push(t0.elapsed().as_secs_f64() * 1e3);
+            }
+            let _ = windows::Win32::Foundation::CloseHandle(event);
+        }
+        (submit, turn)
+    };
+    let stats = |v: &mut Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        let at = |q: f64| v[((v.len() - 1) as f64 * q) as usize];
+        (at(0.5), at(0.99), *v.last().unwrap_or(&0.0))
+    };
+    println!("| pipeline makers (below normal) | pipelines made, ms each (median, worst) | submitting turns | record+submit ms (median, p99, worst) | turn with the wait ms (median, p99, worst) |");
+    println!("|---|---|---|---|---|");
+    let (mut s0, mut t0) = submit_loop(&|| false, std::time::Duration::from_secs(2));
+    let n0 = t0.len();
+    let (a, b, c) = stats(&mut s0);
+    let (d, e, f) = stats(&mut t0);
+    println!("| none | - | {n0} | {a:.3}, {b:.3}, {c:.2} | {d:.3}, {e:.3}, {f:.2} |");
+    for makers in [2usize, 4, 8] {
+        let codes: Vec<Vec<Vec<u8>>> = (0..makers).map(|_| batch(48)).collect();
+        let left = std::sync::atomic::AtomicUsize::new(makers);
+        let times = std::sync::Mutex::new(Vec::new());
+        let (mut s, mut t) = std::thread::scope(|scope| {
+            for mine in &codes {
+                let (device, root, left, times) = (&device, &root, &left, &times);
+                scope.spawn(move || {
+                    // SAFETY: a plain call on our own thread (the workers' priority).
+                    unsafe {
+                        use windows::Win32::System::Threading::*;
+                        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                    }
+                    for code in mine {
+                        let took = make(device, root, code);
+                        times.lock().unwrap_or_else(|e| e.into_inner()).push(took.as_secs_f64() * 1e3);
+                    }
+                    left.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                });
+            }
+            submit_loop(&|| left.load(std::sync::atomic::Ordering::Relaxed) > 0, std::time::Duration::ZERO)
+        });
+        let mut made = times.into_inner().unwrap_or_else(|e| e.into_inner());
+        let count = made.len();
+        let (pm, _, pw) = stats(&mut made);
+        let n = t.len();
+        let (a, b, c) = stats(&mut s);
+        let (d, e, f) = stats(&mut t);
+        println!("| {makers} | {count}: {pm:.1}, {pw:.1} | {n} | {a:.3}, {b:.3}, {c:.2} | {d:.3}, {e:.3}, {f:.2} |");
+        println!("PSO-ROW {makers}|{pm:.2}|{pw:.2}|{a:.3}|{b:.3}|{c:.2}|{d:.3}|{e:.3}|{f:.2}");
+    }
+    drop(out);
+}
