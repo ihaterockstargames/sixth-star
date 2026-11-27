@@ -97,6 +97,9 @@ goto :end
 :cargo_ok
 if defined HAVE_CARGO call :say "cargo     found"
 if not defined HAVE_CARGO call :say "cargo     not found"
+set "SIXTH_COMMIT="
+for /f "delims=" %%c in ('git -C "%REPO%" rev-parse --short HEAD 2^>nul') do set "SIXTH_COMMIT=%%c"
+if defined SIXTH_COMMIT call :say "commit    %SIXTH_COMMIT%"
 set "DXIL=%VICTORY_DXIL%"
 set "KITS=%ProgramFiles(x86)%\Windows Kits\10\bin"
 if not defined DXIL for /d %%d in ("%KITS%\10.*") do if exist "%%d\x64\dxil.dll" set "DXIL=%%d\x64\dxil.dll"

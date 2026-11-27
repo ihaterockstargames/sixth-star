@@ -130,7 +130,7 @@ function Read-Run([string]$log) {
         Vram = New-Object System.Collections.Generic.List[object]
         Residency = $null; Memory = $null; Session = $null; Startup = $null; Cpu = $null; Exit = $null
         SessionS = $null; SessionFrames = $null; SessionFps = $null; SessionMs = $null; WorstFps = $null; LongestGap = $null; NotRun = $null
-        LowestRamFree = $null; MenuLines = 0
+        LowestRamFree = $null; MenuLines = 0; Commit = $null
         FirstError = $null
     }
     $first = $null
@@ -188,6 +188,7 @@ function Read-Run([string]$log) {
         if ($line -match '(?i)device (was )?removed|device went|DEVICE_REMOVED|DXGI_ERROR_DEVICE') { $r.Removed++ }
         if ($line -match 'panicked at') { $r.Panics++; if (-not $r.FirstError) { $r.FirstError = $line } }
         if ($line -match '^\[run\] exit code (-?\d+)') { $r.Exit = [int64]$Matches[1] }
+        if ($line -match '^\[run\] commit\s+(\S+)') { $r.Commit = $Matches[1] }
     }
     # The frame lines counted: from SkipSeconds after the first one (by the
     # log's clock), or the last two thirds when the lines carry no time.
@@ -267,6 +268,7 @@ function Write-Report($runs, [string]$path, $info) {
     $out.Add($head)
     $out.Add('|---|' + (($runs | ForEach-Object { '---' }) -join '|') + '|')
     $rows = @(
+        @('Commit the run was built from', { param($x) if ($x.Run.Commit) { $x.Run.Commit } else { 'not in the log (runs before e847242)' } }),
         @('Settings', { param($x) if ($x.Overrides.Count) { ($x.Overrides.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' ' } else { 'defaults' } }),
         @('Gameplay frame lines counted (of all; menu or loading lines left out)', { param($x) "$($x.Run.Counted) of $($x.Run.FrameLines) ($($x.Run.MenuLines) left out)" }),
         @('FPS', { param($x) F $x.Run.Median.Fps '{0:N2}' }),
@@ -337,7 +339,8 @@ function Write-Report($runs, [string]$path, $info) {
         }
         $len = '{0} min {1} s' -f [int][math]::Floor($x.Run.SessionS / 60), ($x.Run.SessionS % 60)
         $ended = if ($x.Stopped) { 'without a crash (the run was stopped by the A/B script when its time was up)' } elseif ($null -eq $x.Stopped) { '(how the run ended is not known from the log alone)' } else { 'and then the run ended by itself (crash, exit or closed by hand)' }
-        $out.Add("- $(Get-Date -Format 'yyyy-MM-dd'), build $($info['commit']), $settings`: $game; a session of at least $len after the first frame $ended, worst second $('{0:N2}' -f $x.Run.WorstFps) FPS, longest time between two presents $('{0:N2}' -f $x.Run.LongestGap) s. The session line's average ($('{0:N2}' -f $x.Run.SessionFps) FPS) counts the menus too and is not a gameplay figure. Measured by the maintainer from the runner's own lines.")
+        $build = if ($x.Run.Commit) { $x.Run.Commit } elseif ($null -eq $x.Stopped) { 'not recorded in the log' } else { $info['commit'] }
+        $out.Add("- $(Get-Date -Format 'yyyy-MM-dd'), build $build, $settings`: $game; a session of at least $len after the first frame $ended, worst second $('{0:N2}' -f $x.Run.WorstFps) FPS, longest time between two presents $('{0:N2}' -f $x.Run.LongestGap) s. The session line's average ($('{0:N2}' -f $x.Run.SessionFps) FPS) counts the menus too and is not a gameplay figure. Measured by the maintainer from the runner's own lines.")
     }
     $out.Add('')
     $out.Add('Send this file back as it is. It holds no paths but the logs'' and no game data.')
@@ -370,7 +373,9 @@ if ($ParseOnly.Count) {
         [pscustomobject]@{ Name = (Get-Name $name); Overrides = (Get-Overrides $name); Run = (Read-Run (Resolve-Path $logs[$i]).Path); Seconds = $null; Stopped = $null }
     }
     if (-not $OutDir) { $OutDir = Split-Path -Parent (Resolve-Path $logs[0]).Path }
-    Write-Report $runs (Join-Path $OutDir 'ab-report.md') (Get-Build)
+    $now = Get-Build
+    $now['commit'] = "$($now['commit']) now (logs read afterwards: each run's own commit is in the table when its log names it)"
+    Write-Report $runs (Join-Path $OutDir 'ab-report.md') $now
     exit 0
 }
 
