@@ -92,7 +92,11 @@ function ConvertTo-Hash($o) {
         foreach ($p in $o.PSObject.Properties) { $h[$p.Name] = ConvertTo-Hash $p.Value }
         return $h
     }
-    if ($o -is [System.Collections.IEnumerable] -and $o -isnot [string]) { return @($o | ForEach-Object { ConvertTo-Hash $_ }) }
+    # The comma keeps a list of one a list: returned bare, PowerShell
+    # unrolls it, and a run's one attempt came back as the attempt itself
+    # (so `attempts[-1]` of a resumed cycle or of the last cycle in
+    # history.jsonl was nothing, and the comparison compared nothing).
+    if ($o -is [System.Collections.IEnumerable] -and $o -isnot [string]) { return , @($o | ForEach-Object { ConvertTo-Hash $_ }) }
     return $o
 }
 function Save-State($state) {
@@ -209,7 +213,8 @@ function Invoke-Title([string]$config, [string]$dir) {
     $over = ConvertTo-Hash ((& powershell -NoProfile -ExecutionPolicy Bypass -File $ab -Overrides $config) | ConvertFrom-Json)
     $result = [ordered]@{ config = $config; settings = $over; attempts = @() }
     for ($attempt = 1; $attempt -le 1 + $Retries; $attempt++) {
-        $run = Join-Path $dir "$config-$attempt"
+        # A named configuration (`name:VAR=v;VAR=v`) runs in a folder of its name.
+        $run = Join-Path $dir "$($config -replace ':.*$', '')-$attempt"
         if (Test-Path $run) { Remove-Item -Recurse -Force $run }
         New-Item -ItemType Directory -Force (Join-Path $run 'frames') | Out-Null
         Copy-Item $titleExe $run
@@ -305,10 +310,10 @@ function Stage-Compare($cycle) {
     if ($titles) {
         foreach ($name in $titles.Keys) {
             $t = $titles[$name]
-            if (-not $t.ok) { $r.broken += "title $name`: $($t.attempts[-1].outcome), picture $($t.attempts[-1].picture.mismatches) wrong" }
+            if (-not $t.ok) { $r.broken += "title $name`: $(@($t.attempts)[-1].outcome), picture $(@($t.attempts)[-1].picture.mismatches) wrong" }
             if ($t.restarted) { $r.broken += "title $name`: needed a restart" }
-            $now = $t.attempts[-1]
-            $old = if ($prev -and $prev.results.title -and $prev.results.title[$name]) { $prev.results.title[$name].attempts[-1] } else { $null }
+            $now = @($t.attempts)[-1]
+            $old = if ($prev -and $prev.results.title -and $prev.results.title[$name]) { @($prev.results.title[$name].attempts)[-1] } else { $null }
             if ($old -and $old.usPerFrame -and $now.usPerFrame) {
                 $d = ($now.usPerFrame - $old.usPerFrame) / $old.usPerFrame * 100
                 if ([math]::Abs($d) -ge 10) { $r.changes += ("title {0}: {1:+0;-0}% time per frame ({2} -> {3} us)" -f $name, $d, $old.usPerFrame, $now.usPerFrame) }
@@ -317,7 +322,9 @@ function Stage-Compare($cycle) {
                 foreach ($k in @('preparing', 'gpuWork', 'backMs')) {
                     $o = $old.runtime[$k]; $n = $now.runtime[$k]
                     if ($null -eq $o -or $null -eq $n) { continue }
-                    $d = ($n - $o) / [math]::Max($o, 0.1) * 100
+                    # As doubles: for a whole 0 (no copying back) [math]::Max
+                    # took its integer form, 0.1 became 0 and this divided by it.
+                    $d = ([double]$n - [double]$o) / [math]::Max([double]$o, 0.1) * 100
                     if ([math]::Abs($d) -ge 15 -and [math]::Abs($n - $o) -ge 0.3) { $r.changes += ("title {0}: {1:+0;-0}% {2} ({3} -> {4} ms)" -f $name, $d, $k, $o, $n) }
                 }
             }
@@ -379,7 +386,7 @@ function Write-CycleReport($cycle, [string]$dir) {
         $o.Add('| configuration | outcome | FPS (lowest second) | us per frame (worst) | CPU preparing, ms | copies, MB/frame | GPU work, ms (fence wait) | copying back, ms | RAM free, GiB | picture |')
         $o.Add('|---|---|---|---|---|---|---|---|---|---|')
         foreach ($k in $titles.Keys) {
-            $a = $titles[$k].attempts[-1]; $rt = $a.runtime
+            $a = @($titles[$k].attempts)[-1]; $rt = $a.runtime
             $pic = if ($a.picture.checked -eq 0) { 'no frame' } elseif ($a.picture.mismatches -eq 0) { "right ($($a.picture.checked) frames)" } else { "**$($a.picture.mismatches) wrong**" }
             $o.Add("| $k | $($a.outcome)$(if ($titles[$k].restarted) { ' (after a restart)' }) | $($a.fpsMedian) ($($a.fpsLowest)) | $($a.usPerFrame) ($($a.worstUs)) | $(if ($rt) { $rt.preparing }) | $(if ($rt) { $rt.copiesMb }) | $(if ($rt) { "$($rt.gpuWork) ($($rt.gpu))" }) | $(if ($rt) { $rt.backMs }) | $(if ($rt) { $rt.ramFree }) | $pic |")
         }
