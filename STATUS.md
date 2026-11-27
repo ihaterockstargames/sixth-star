@@ -188,6 +188,24 @@ On this workload, copying textures from the buffers' host copies
 (`texcopy`, part of `best`) costs about 0.5 ms more CPU per frame than
 the default.
 
+Cycles 4 to 8, 2026-11-27 (night runs):
+
+- Cycle 4 (`5b80b92`): one test failed now and then (the hot-copy swap
+  test ran out of frames when other tests had left hot copies on the
+  card). Fixed in the test (`0875a24`); cycle 6 passed 672 tests.
+- `6133e9d`: with `VICTORY_WIDE_REFRESH=1`, a list's texture copies from
+  title buffers (fills) run on several threads. Before, the switch never
+  applied to them. Stand-in title, 16 buffers of 3 MB copied a frame
+  (49.2 MB), two runs each:
+
+| Configuration | CPU preparing before, ms | after, ms | Picture |
+|---|---|---|---|
+| `baseline` | 4.2 | 4.2 | right |
+| `wide` | 4.2 | 2.7 (both runs) | right |
+
+  The switch stays **off by default**: it has not been measured on the
+  test title.
+
 ## Where the frame time goes (2026-11-26, gameplay)
 
 Gameplay, measured by the maintainer from the runner's frame line on 2026-11-26:
@@ -238,6 +256,7 @@ Task Manager figures were not taken for this run.
 | 2026-11-26 | current main (build not recorded) | ran without a crash | latest session, observed by the maintainer; length not recorded |
 | 2026-11-26 | current main (build not recorded) | gameplay 4.59 FPS (217.9 ms/frame) | measured by the maintainer from the runner's frame line on 2026-11-26: 82.3 ms CPU preparing, 86.6 ms waiting for the GPU, 44.7 ms copying back, in series |
 | 2026-11-27 | `a6ab611` | autonomous test runner (`autotest.bat`) and a stand-in title through the runtime: 6 of 6 configurations ran and showed the right picture; 669 tests passed | automated, on this machine; not the test title |
+| 2026-11-27 | `6133e9d` | stand-in title, 16 copies: CPU preparing 4.2 -> 2.7 ms with `VICTORY_WIDE_REFRESH=1` (fills on several threads); default unchanged; a flaky test fixed (`0875a24`) | automated night run, on this machine; not the test title |
 | 2026-11-27 | `e847242` | texture fallback off by default again; the PC's memory on the frame line; `ab.bat` counts gameplay frame lines only | not measured on the title yet |
 | 2026-11-27 | `b5efb43` | stability run (`best` switches): ended by itself after a session of about 6 min (exit code 1), gameplay ~0.2 FPS | from the runner's lines; no error, device removal or panic logged; seen as a crash by the maintainer |
 | 2026-11-27 | `b5efb43` | gameplay ~0.7 FPS (median 1,438.3 ms/frame) with the defaults (fallback on); ~0.9 FPS (1,076.4 ms/frame) with `VICTORY_TEXTURE_FROM_COPY=1` | measured by the maintainer with `ab.bat` (gameplay frame lines only, from 120 s on, one run each); slower than 2026-11-26; no errors, device removals or panics; sometimes missing textures (user-reported) |

@@ -83,6 +83,8 @@ Each item lists: what work it eliminates, which legacy parts become unnecessary,
 4. CPU-written class: dirty runs from contract-scoped write watch, forwarded through the planner; then D5b direct writes.
 5. Remove the legacy path per class once its fixtures and an A/B on the title (run by the maintainer) agree.
 
+**Measured 2026-11-27 (stand-in title, `6133e9d`).** A texture copy from a title buffer is a *fill* (title memory into the list's own upload memory), not a refresh, so `VICTORY_WIDE_REFRESH=1` did not reach it. Fills in a row now run on several threads under that switch (cut into 1 MB pieces, done before the next step of another kind). 16 copies of 3 MB a frame: CPU preparing 4.2 -> 2.7 ms; the default (switch off) is unchanged until the title is measured. This makes the copies faster; it does not make them fewer, which stays the aim of this workstream.
+
 **Synthetic regression tests.**
 - *Producer/consumer*: a compute pass writes a buffer and CPU code reads one dword of it. The value is right, exactly one page is fetched, and no other page is copied.
 - *Untouched GPU memory*: 64 MiB written by the GPU and never read by the CPU means 0 bytes of copy-back.
