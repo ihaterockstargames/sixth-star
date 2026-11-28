@@ -136,6 +136,8 @@ again that way).
 | On the GPU (fence wait), ms | 263.7 | 211.5 |
 | GPU timestamps: the title's work, ms | 224.0 | 186.3 |
 | Copying back, ms (MB) | 286.3 (45.7) | 237.9 (64.9) |
+| Compared for copy-back, MB per frame by the console's memory kind (census; read again 2026-11-28) | physical-page views 257.4, write-combined 173.8, cached 0.4 | physical-page views 257.8, write-combined 172.5, cached 0.4 |
+| Copied back, MB per frame by memory kind (census) | physical-page views 19.8, write-combined 13.0, cached 0.2 | physical-page views 22.4, write-combined 13.6, cached 0.2 |
 | Draws per frame; draws and dispatches not run | 3,063; 778 | 1,649; 246 |
 | Of those, by reason (means; read again 2026-11-28) | ray-tracing builder (off) 943.6, no host pipeline 3.9, not prepared 1.8 | ray-tracing builder (off) 403.0, no host pipeline 3.9, not prepared 0.8 |
 | Host pipelines made / loaded from the library | 670 / 1,120 | 151 / 1,811 |
@@ -150,6 +152,14 @@ again that way).
   dispatches of the ray-tracing structure builder, which is off by default
   and whose structures nothing uses; about 4 draws a frame had no host
   pipeline. The frame line now says "not run", and `ab.bat` lists the reasons.
+- Read again on 2026-11-28 by the runner's census line (`ab.ps1 -ParseOnly`,
+  the median of its lines in gameplay): about 40% of what was compared for
+  copy-back each frame lay in memory the title reserved write-combined (memory
+  the CPU writes and the GPU reads), the rest in views of physical pages.
+  Until `0c9ae88` the census did not tell which of those views lie in
+  write-combined reservations; the next `ab.bat` run says so. Leaving what
+  shaders write there on the card, after foxhound's `VICTORY_WC_NO_BACK`, is
+  the next step. It is **not built yet**.
 - The runner's session averages for these runs (11.54 and 7.48 FPS) count
   the menus at ~30 FPS as well; they are **not** gameplay figures.
 - `VICTORY_HOT_WINDOWS_MB=1024` and the card-buffer switches were also
@@ -427,6 +437,15 @@ Cycles 41 and 42, 2026-11-28 (interactive session):
   right, 9 of 9 pictures right, no cost changed by 10% or more against
   cycle 41.
 
+Cycle 43, 2026-11-28 (interactive session):
+
+- `0c9ae88`: the census of copy-back by memory kind counts views of physical
+  pages in write-combined reservations apart, and `ab.bat` reports the
+  census. Nothing the runtime does changed.
+- Cycle 43 (full): all green, 678 tests passed, every synthetic byte
+  right, 9 of 9 pictures right, no cost changed by 10% or more against
+  cycle 42. Defaults unchanged.
+
 ## Where the frame time goes (2026-11-26, gameplay)
 
 Gameplay, measured by the maintainer from the runner's frame line on 2026-11-26:
@@ -488,6 +507,7 @@ Task Manager figures were not taken for this run.
 | 2026-11-28 | `78458bc` | a flaky test fixed (`e576557`, a shared journal left entries from a freed block); the debugging aids no longer name title-specific code offsets; 676 tests passed, 8 of 8 pictures right, defaults unchanged | automated night run, on the stand-in title (no game) |
 | 2026-11-28 | `eb69c65` | `CONSOLE=series-s` runs without the FidelityFX SDK (bilinear upscale, `VICTORY_FFX_SIMPLE=1`); `ab.bat` configurations `seriess`, `seriessbest`; default profile unchanged (`series-x`); 676 tests passed, 8 of 8 pictures right | automated night run, on the stand-in title (no game); the profile's speed on the test title not measured |
 | 2026-11-28 | `9f16e6d` | `VICTORY_RT_MISS=1` / `RT_MISS=1`: ray tracing off (every ray test answers a miss), off by default; `ab.bat` runs `baseline`, `seriess`, `seriessrt`, `seriessrtbest` by default and lists draws not run by reason; the 27 Nov "dropped without a pipeline" counts were nearly all the switched-off ray-tracing builder; cycles 41 and 42 all green, 677 tests passed, 9 of 9 pictures right | automated, on the stand-in title (no game); not measured on the test title |
+| 2026-11-28 | `0c9ae88` | `ab.bat` reports copy-back by the console's memory kind. Read again, the 27 Nov `baseline` compared 431.6 MB a frame for copy-back, 40% of it in write-combined memory, and copied back 33.0 MB (19.8 views of physical pages, 13.0 write-combined); 678 tests passed, 9 of 9 pictures right, defaults unchanged | from the maintainer's 27 Nov logs, read with `ab.ps1 -ParseOnly` (the runner's own counters); the cycle automated, on the stand-in title (no game) |
 | 2026-11-27 | `e847242` | texture fallback off by default again; the PC's memory on the frame line; `ab.bat` counts gameplay frame lines only | not measured on the title yet |
 | 2026-11-27 | `b5efb43` | stability run (`best` switches): ended by itself after a session of about 6 min (exit code 1), gameplay ~0.2 FPS | from the runner's lines; no error, device removal or panic logged; seen as a crash by the maintainer |
 | 2026-11-27 | `b5efb43` | gameplay ~0.7 FPS (median 1,438.3 ms/frame) with the defaults (fallback on); ~0.9 FPS (1,076.4 ms/frame) with `VICTORY_TEXTURE_FROM_COPY=1` | measured by the maintainer with `ab.bat` (gameplay frame lines only, from 120 s on, one run each); slower than 2026-11-26; no errors, device removals or panics; sometimes missing textures (user-reported) |
