@@ -290,7 +290,17 @@ pub(crate) fn builder_off(why: &'static str) {
 #[cfg(windows)]
 pub(crate) fn builder_runs() -> bool {
     static ALLOWED: OnceLock<bool> = OnceLock::new();
-    if !*ALLOWED.get_or_init(|| std::env::var_os("VICTORY_BVH_BUILDER").is_some_and(|v| v == "1")) {
+    let allowed = *ALLOWED.get_or_init(|| {
+        let asked = std::env::var_os("VICTORY_BVH_BUILDER").is_some_and(|v| v == "1");
+        // With every node test answered as a miss nothing reads the
+        // structures: building them would be work for nobody.
+        if asked && victory_shader::emit::rt_miss() {
+            tracing::warn!("VICTORY_BVH_BUILDER=1 is ignored: VICTORY_RT_MISS=1 answers every ray-tracing node test with a miss");
+            return false;
+        }
+        asked
+    });
+    if !allowed {
         return false;
     }
     let mut b = BUILDER.lock().unwrap_or_else(|e| e.into_inner());

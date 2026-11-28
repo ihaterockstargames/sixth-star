@@ -171,6 +171,10 @@ pub enum BvhNodes {
     /// (the title: the whole address space, or one structure's address in
     /// dword 0). Dwords 1 and 3, which hold its flags.
     Memory { word1: u32, word3: u32 },
+    /// No node is read ([`crate::emit::rt_miss`], `VICTORY_RT_MISS=1`):
+    /// the test answers that the ray enters no box and hits no triangle,
+    /// so its descriptor is not traced either.
+    Missed,
 }
 
 /// Waterfall loops over descriptors that differ between lanes: each pass
@@ -266,6 +270,9 @@ pub fn track(
                         _ => None,
                     };
                     match (word(1), word(3)) {
+                        // Every test answers a miss: the descriptor is not
+                        // read, so whatever it is does not matter.
+                        _ if crate::emit::rt_miss() => out.bvh.push((site, BvhNodes::Missed)),
                         (Some(Term::Const(word1)), Some(Term::Const(word3)))
                             if word3 >> 28 == crate::bvh::DESCRIPTOR_TYPE =>
                         {

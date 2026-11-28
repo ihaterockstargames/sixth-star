@@ -227,6 +227,8 @@ if defined BCPACK_TABLES (
 
 if "%SHADER_OPT%"=="" set "SHADER_OPT=0"
 set "VICTORY_SHADER_OPT=%SHADER_OPT%"
+rem RT_MISS=1: every ray-tracing node test answers a miss (ray tracing off).
+if "%RT_MISS%"=="1" set "VICTORY_RT_MISS=1"
 if "%DRED%"=="1" set "VICTORY_D3D12_DRED=1"
 if defined SKIP_PIPELINES set "VICTORY_SKIP_PIPELINES=%SKIP_PIPELINES%"
 if defined SKIP_LIST call :abspath SKIP_LIST "%SKIP_LIST%" "%CONFIG_DIR%"
@@ -289,6 +291,7 @@ if defined SHOW_BCPACK (
 )
 if exist "%REPO%\scripts\rebar.ps1" powershell -NoProfile -ExecutionPolicy Bypass -File "%REPO%\scripts\rebar.ps1"
 if defined VICTORY_SKIP_PIPELINES call :say "skipping  %VICTORY_SKIP_PIPELINES%"
+if "%VICTORY_RT_MISS%"=="1" call :say "rays      off (VICTORY_RT_MISS=1): every ray test answers a miss; no ray-traced shadows, reflections or indirect light"
 if /i "%MODE%"=="doctor" (
     call :say "doctor    settings and dependencies look usable"
     goto :end

@@ -54,6 +54,12 @@ set "PRESET=safe"
 rem 0 = translate shaders as they are, 1 = optimise them (experimental).
 set "SHADER_OPT=0"
 
+rem 1 = ray tracing off: every ray test answers "nothing hit" (no ray-traced
+rem shadows, reflections or indirect light; less work for the card). It
+rem changes how shaders are translated: the first run after switching it
+rem translates the shaders with ray tests again.
+set "RT_MISS=0"
+
 rem Shaders whose compile never finishes on your GPU driver, by hash:
 rem comma-separated in SKIP_PIPELINES, or one file with the list in SKIP_LIST.
 rem Leave both empty unless you know a shader hangs your driver.

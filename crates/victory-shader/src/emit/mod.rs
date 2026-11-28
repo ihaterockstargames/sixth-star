@@ -189,6 +189,43 @@ pub fn shader_opt() -> u32 {
     *PASSES.get_or_init(|| parse_shader_opt(std::env::var("VICTORY_SHADER_OPT").ok().as_deref()))
 }
 
+/// Whether every ray-tracing node test (`image_bvh_intersect_ray`,
+/// `image_bvh64_intersect_ray`) answers "nothing hit" without reading its
+/// node: four child pointers of [`crate::bvh::NONE`] for a box node, a
+/// triangle miss ([`crate::bvh::MISS`]) for any other kind, from the
+/// pointer's kind bits alone. `VICTORY_RT_MISS=1`; off by default.
+///
+/// A program's walk through the structure then ends at its first node
+/// test, and every ray takes the program's own miss path: lit where a
+/// shadow ray finds nothing in the way, the program's sky or stand-in
+/// where a reflection or indirect ray would. That is ray tracing off: the
+/// picture loses ray-traced shadows, reflections and indirect light.
+///
+/// Why: with the structure builder off (the default, `VICTORY_BVH_BUILDER`
+/// in `victory-gpu`), the nodes the tests read are whatever title memory
+/// holds there, never a structure. A ray can then walk garbage for many
+/// node tests, each a read of title memory, and hit garbage: another fork
+/// on the same base reports black and glittering faces under local lights
+/// until it answered every test with a miss (VI-BR-PORT by edsuuu, its
+/// `VICTORY_RT_MISS`, GPL-3.0-or-later; written anew here).
+///
+/// Part of the translation: the shader cache keys on it (`victory-gpu`'s
+/// does).
+pub fn rt_miss() -> bool {
+    #[cfg(test)]
+    if let Some(on) = TEST_RT_MISS.get() {
+        return on;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_RT_MISS").is_some_and(|v| v == "1"))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's [`rt_miss`], for its thread only.
+    pub(crate) static TEST_RT_MISS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
 /// `VICTORY_SHADER_OPT`'s value; every pass when it is unset or
 /// unreadable. Pure, for testing.
 fn parse_shader_opt(value: Option<&str>) -> u32 {

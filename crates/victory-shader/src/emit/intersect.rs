@@ -103,12 +103,16 @@ impl<'a> Lower<'a> {
             .find(|n| n.0 == site)
             .map(|n| n.1)
             .ok_or("an untracked ray-tracing structure")?;
+        if nodes == BvhNodes::Missed {
+            return self.bvh_missed(inst, b, i, regs[0], dst);
+        }
         let (sort, barycentrics) = match nodes {
             BvhNodes::Resource => (true, true),
             BvhNodes::Memory { word1, word3 } => (
                 word1 & bvh::BOX_SORT != 0,
                 word3 & bvh::RETURN_BARYCENTRICS != 0,
             ),
+            BvhNodes::Missed => unreachable!("answered above"),
         };
         if !barycentrics {
             // Mode 0 returns a triangle id and a hit status in the last two
@@ -171,6 +175,7 @@ impl<'a> Lower<'a> {
                     high,
                 }
             }
+            BvhNodes::Missed => unreachable!("answered above"),
         };
         let zero = self.s.m.i32(0);
         let gate = self.begin_guarded(guard);
@@ -216,6 +221,28 @@ impl<'a> Lower<'a> {
         }
         let results = self.end_guarded(gate, &results);
         for (k, &r) in results.iter().enumerate() {
+            self.write(inst, Reg::V(dst + k as u8), r, guard);
+        }
+        Ok(())
+    }
+
+    /// The node test of [`BvhNodes::Missed`] (`VICTORY_RT_MISS=1`): from the
+    /// node pointer in VGPR `pointer` alone, four child pointers of
+    /// [`bvh::NONE`] for a box node and [`bvh::MISS`] for any other kind,
+    /// into `dst`. No node is read and no branch is made, so a program's
+    /// walk through the structure ends at its first test.
+    fn bvh_missed(&mut self, inst: &Inst, b: usize, i: usize, pointer: u8, dst: u8) -> Result<(), Why> {
+        let guard = self.guard(b, i)?;
+        let v = inst.read(Reg::V(pointer)).ok_or("an unread operand")?;
+        let pointer = self.i32_of(v)?;
+        let c = self.cur;
+        let (k4, k6) = (self.s.m.i32(4), self.s.m.i32(6));
+        let pair = self.s.m.bin(c, Bin::And, pointer, k6);
+        let is_box = self.s.m.cmp(c, pred::EQ, pair, k4);
+        let none = self.s.m.i32(bvh::NONE);
+        for (k, miss) in bvh::MISS.iter().enumerate() {
+            let miss = self.s.m.i32(miss.to_bits());
+            let r = self.s.m.select(c, is_box, none, miss);
             self.write(inst, Reg::V(dst + k as u8), r, guard);
         }
         Ok(())

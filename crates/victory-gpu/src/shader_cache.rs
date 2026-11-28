@@ -51,6 +51,12 @@ fn build() -> &'static [u8; 32] {
                 "VICTORY_SHADER_LOOP_LIMIT: translated loops stop sooner"
             );
         }
+        if victory_shader::emit::rt_miss() {
+            tracing::warn!(
+                "VICTORY_RT_MISS=1: every ray-tracing node test answers a miss (ray tracing off: no ray-traced shadows, \
+                 reflections or indirect light)"
+            );
+        }
         match exe {
             Ok(mut bytes) => {
                 bytes.extend_from_slice(&limit.to_le_bytes());
@@ -73,6 +79,8 @@ fn build() -> &'static [u8; 32] {
                     "VICTORY_PS_HALVES",
                     "VICTORY_DENORM",
                     "VICTORY_NAN_GUARD",
+                    // Every ray-tracing node test answers a miss.
+                    "VICTORY_RT_MISS",
                 ] {
                     bytes.extend_from_slice(name.as_bytes());
                     bytes.push(b'=');

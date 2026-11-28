@@ -528,6 +528,18 @@ fn run(wide: bool, descriptor: Descriptor, pointers: u64, sort: bool) {
             .any(|c| expected(&scene, c, true) != expected(&scene, c, false)),
         "no case tells sorted from unsorted"
     );
+    on_the_card(&shader, &scene, &batches, pointers, &|c| expected(&scene, c, sort));
+}
+
+/// Runs every batch with `shader` on the hardware adapter and WARP: each
+/// thread's result must be `want` of its case.
+fn on_the_card(
+    shader: &HostShader,
+    scene: &Scene,
+    batches: &[Vec<Case>],
+    pointers: u64,
+    want: &dyn Fn(&Case) -> [u32; 4],
+) {
     let _one = super::valu_tests::ONE_AT_A_TIME
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -537,10 +549,10 @@ fn run(wide: bool, descriptor: Descriptor, pointers: u64, sort: bool) {
             continue;
         };
         let (root, pso) = host
-            .compute_pipeline(&shader)
+            .compute_pipeline(shader)
             .unwrap_or_else(|e| panic!("{label}: compute_pipeline failed: {e}"));
         for (b, batch) in batches.iter().enumerate() {
-            let data = buffer(&scene, batch, pointers);
+            let data = buffer(scene, batch, pointers);
             let out = host
                 .dispatch(
                     &root,
@@ -562,7 +574,7 @@ fn run(wide: bool, descriptor: Descriptor, pointers: u64, sort: bool) {
             for t in 0..THREADS as usize {
                 let case = batch.get(t).copied().flatten();
                 let want = match batch.get(t) {
-                    Some(c) => expected(&scene, c, sort),
+                    Some(c) => want(c),
                     // A thread past the batch: its record is zeros, so it
                     // is masked out.
                     None => BEFORE,
@@ -685,5 +697,61 @@ fn a_structure_that_returns_triangle_ids_is_refused_by_name() {
             assert_eq!(what, "a ray-tracing structure that returns triangle ids");
         }
         other => panic!("{:?}", other.map(|_| ())),
+    }
+}
+
+/// Sets the tests' [`super::rt_miss`] for this thread until dropped.
+struct Missing;
+
+impl Missing {
+    fn on() -> Self {
+        super::TEST_RT_MISS.set(Some(true));
+        Self
+    }
+}
+
+impl Drop for Missing {
+    fn drop(&mut self) {
+        super::TEST_RT_MISS.set(None);
+    }
+}
+
+/// What every node test answers with `VICTORY_RT_MISS=1`: no child of a
+/// box node, a triangle miss for any other kind.
+fn missed(case: &Case) -> [u32; 4] {
+    match case {
+        Some((_, kind, _)) if kind & 6 == 4 => [bvh::NONE; 4],
+        Some(_) => bvh::MISS.map(f32::to_bits),
+        None => BEFORE,
+    }
+}
+
+#[test]
+fn with_rt_miss_every_node_test_answers_a_miss_on_the_card() {
+    let _miss = Missing::on();
+    let (scene, batches) = scene();
+    // The reference hits in many of the cases, or a miss everywhere would
+    // prove little.
+    let hits = batches
+        .iter()
+        .flatten()
+        .filter(|c| expected(&scene, c, true) != missed(c))
+        .count();
+    assert!(hits > 50, "only {hits} cases the reference hits");
+    for (wide, descriptor, pointers) in [
+        (true, Descriptor::Table, u64::from(NODES)),
+        (false, Descriptor::Table, u64::from(NODES)),
+        (true, WHOLE, BASE + u64::from(NODES)),
+    ] {
+        let (shader, res) = build(wide, descriptor).expect("the program lowers");
+        assert_eq!(res.bvh.len(), 1);
+        assert_eq!(res.bvh[0].1, BvhNodes::Missed);
+        // The structure's descriptor is not taken (in the table's form it
+        // would be a sixth): the buffer loads' and the store's are all
+        // there is, and title memory is not read.
+        assert_eq!(res.descriptors.len(), 5);
+        assert!(!shader.root_srvs.contains(&super::SLOT_MEMORY));
+        assert!(!shader.root_uavs.contains(&super::SLOT_FAULTS));
+        on_the_card(&shader, &scene, &batches, pointers, &missed);
     }
 }
