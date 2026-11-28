@@ -36,6 +36,9 @@
 #   texwatched     texcopy with VICTORY_WATCHED_ALLOC=1
 #   texhot         texwatched with VICTORY_HOT_SKIP=1 (buffers found wholly written
 #                  twice in a row skip the write-watch asking for 8 askings)
+#   seriess        CONSOLE=series-s with VICTORY_FFX_SIMPLE=1 (the Series S
+#                  profile, 720p, with a bilinear upscale: no FidelityFX SDK needed)
+#   seriessbest    seriess with the best switches
 #   wide          VICTORY_WIDE_REFRESH=1 (refreshes on several threads)
 #   fills          VICTORY_WIDE_FILLS=1 (a list's fills on several threads; the default
 #                  since 2026-11-27)
@@ -116,6 +119,8 @@ function Get-Overrides([string]$name) {
         '^watched$' { return [ordered]@{ VICTORY_WATCHED_ALLOC = '1' } }
         '^texwatched$' { return [ordered]@{ VICTORY_TEXTURE_FROM_COPY = '1'; VICTORY_WATCHED_ALLOC = '1' } }
         '^texhot$' { return [ordered]@{ VICTORY_TEXTURE_FROM_COPY = '1'; VICTORY_WATCHED_ALLOC = '1'; VICTORY_HOT_SKIP = '1' } }
+        '^seriess$' { return [ordered]@{ CONSOLE = 'series-s'; VICTORY_FFX_SIMPLE = '1' } }
+        '^seriessbest$' { return [ordered]@{ CONSOLE = 'series-s'; VICTORY_FFX_SIMPLE = '1'; VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_TEXTURE_FROM_COPY = '1' } }
         '^wide$' { return [ordered]@{ VICTORY_WIDE_REFRESH = '1' } }
         '^fills$' { return [ordered]@{ VICTORY_WIDE_FILLS = '1' } }
         '^nofills$' { return [ordered]@{ VICTORY_WIDE_FILLS = '0' } }
@@ -492,7 +497,7 @@ try {
         # setting in run.config.bat does not leak into another configuration.
         foreach ($v in @('VICTORY_HOT_WINDOWS_MB', 'VICTORY_RESIDENCY', 'VICTORY_PROMOTE', 'VICTORY_RELAY', 'VICTORY_LATE_WAIT',
                 'VICTORY_CARD_BUFFERS_MIN_MB', 'VICTORY_CARD_BUFFERS_MB', 'VICTORY_WIDE_REFRESH', 'VICTORY_WIDE_FILLS', 'VICTORY_KEEP_SNAPSHOTS', 'VICTORY_BACK_NOTE',
-                'VICTORY_TEXTURE_FROM_COPY')) {
+                'VICTORY_TEXTURE_FROM_COPY', 'VICTORY_PLAIN_COPY', 'VICTORY_WATCHED_ALLOC', 'VICTORY_HOT_SKIP', 'CONSOLE', 'VICTORY_FFX_SIMPLE')) {
             if (-not $over.Contains($v)) { $lines += "set `"$v=`"" }
         }
         foreach ($k in $over.Keys) { $lines += "set `"$k=$($over[$k])`"" }

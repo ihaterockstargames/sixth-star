@@ -21,7 +21,8 @@ rem manifest to use instead of GAME_DIR\MicrosoftGame.config.
 set "WORK_DIR="
 set "MANIFEST="
 
-rem series-x (default) or series-s (720p + FSR; needs FFX_DIR).
+rem series-x (default) or series-s (720p + FSR with FFX_DIR; without it a
+rem bilinear upscale, VICTORY_FFX_SIMPLE=1).
 set "CONSOLE=series-x"
 
 rem Only for series-s: the FidelityFX SDK's ...\Kits\FidelityFX\signedbin.

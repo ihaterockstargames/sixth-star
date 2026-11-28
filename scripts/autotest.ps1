@@ -77,7 +77,8 @@ $allStages = @('build', 'tests', 'bench', 'title', 'compare')
 # Every switch a configuration may set: cleared before each title run.
 $switches = @('VICTORY_HOT_WINDOWS_MB', 'VICTORY_RESIDENCY', 'VICTORY_PROMOTE', 'VICTORY_RELAY', 'VICTORY_LATE_WAIT',
     'VICTORY_CARD_BUFFERS_MIN_MB', 'VICTORY_CARD_BUFFERS_MB', 'VICTORY_TEXTURE_FROM_COPY', 'VICTORY_WIDE_REFRESH', 'VICTORY_WIDE_FILLS',
-    'VICTORY_WIDE_BACK', 'VICTORY_KEEP_SNAPSHOTS', 'VICTORY_BACK_NOTE')
+    'VICTORY_WIDE_BACK', 'VICTORY_KEEP_SNAPSHOTS', 'VICTORY_BACK_NOTE', 'VICTORY_PLAIN_COPY', 'VICTORY_WATCHED_ALLOC', 'VICTORY_HOT_SKIP',
+    'VICTORY_FFX_SIMPLE')
 # The stand-in title's picture (tests\fixtures\test-title\src\main.rs): a
 # blue band over an 8 x 4 grid, block (r, c) in PALETTE[(r * 3 + c) % 8].
 $palette = @(@(230, 25, 75), @(60, 180, 75), @(255, 225, 25), @(0, 130, 200), @(245, 130, 48), @(145, 30, 180), @(70, 240, 240), @(240, 50, 230))

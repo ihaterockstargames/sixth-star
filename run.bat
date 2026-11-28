@@ -164,18 +164,25 @@ if /i not "%CONSOLE%"=="series-s" (
     set "RC=1"
     goto :end
 )
-if not defined FFX_DIR (
-    call :say "WARNING   series-s needs FFX_DIR (FidelityFX signedbin); using series-x"
-    set "CONSOLE=series-x"
+rem series-s without the FidelityFX SDK: the title's upscale is answered
+rem with a bilinear scale (VICTORY_FFX_SIMPLE=1, no FSR, no history).
+if "%VICTORY_FFX_SIMPLE%"=="1" (
+    call :say "console   series-s with VICTORY_FFX_SIMPLE=1: bilinear upscale, FFX_DIR not used"
     goto :console_ok
+)
+if not defined FFX_DIR (
+    call :say "WARNING   series-s without FFX_DIR (FidelityFX signedbin): VICTORY_FFX_SIMPLE=1, a bilinear upscale instead of FSR"
+    goto :ffx_simple
 )
 call :abspath FFX_DIR "%FFX_DIR%" "%CONFIG_DIR%"
 if not exist "%FFX_DIR%\" (
-    call :say "WARNING   FFX_DIR is not a folder: %FFX_DIR%; using series-x"
-    set "CONSOLE=series-x"
-    goto :console_ok
+    call :say "WARNING   FFX_DIR is not a folder: %FFX_DIR%; VICTORY_FFX_SIMPLE=1, a bilinear upscale instead of FSR"
+    goto :ffx_simple
 )
 set "VICTORY_FFX_DIR=%FFX_DIR%"
+goto :console_ok
+:ffx_simple
+set "VICTORY_FFX_SIMPLE=1"
 :console_ok
 
 rem Resolution: OUTPUT_MODE is the window and swap chain (empty: they follow
