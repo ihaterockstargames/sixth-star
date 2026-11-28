@@ -171,11 +171,10 @@ fn diagnostics(image: &victory_loader::LoadedImage, cfg: &victory_core::Config) 
 }
 
 /// Debugging aid: `VICTORY_UPSCALER=<rva>[,<kind>]` (hex rva, decimal kind,
-/// default 7) makes the title's upscaler picker return `kind`. In 1.0.2.1 the
-/// picker is at 7E93F0 and reached by 4 direct calls; it returns 7 (AMD FSR)
-/// only on Series S and 6 (the title's own upscaler) otherwise. The count of
-/// direct calls and jumps to the rva is logged; with none it is the wrong rva
-/// for this executable and nothing is patched.
+/// default 7): the function at <rva> returns the upscaler kind a title picks,
+/// and is patched to return `kind` instead. The rva is title-specific, so it
+/// has no default. The count of direct calls and jumps to the rva is logged;
+/// with none it is the wrong rva for this executable and nothing is patched.
 #[cfg(all(windows, feature = "diagnostics"))]
 fn upscaler_override(image: &victory_loader::LoadedImage) {
     use windows_sys::Win32::System::Memory::{PAGE_EXECUTE_READWRITE, VirtualProtect};
@@ -227,12 +226,10 @@ fn upscaler_override(image: &victory_loader::LoadedImage) {
     eprintln!("Sixth Star: upscaler picker at title+{rva:#x} returns {kind} ({calls} direct calls)");
 }
 
-/// Debugging aid: `VICTORY_FFX_SCALE=<scale>[,<hex rva>]` sets the render
-/// scale of the title's FidelityFX path (0.5: 1080p for a 4K output, 0.6667:
-/// 1440p). The rva is the method that picks the scale (1.0.2.1: 28EF680, the
-/// default); it takes 2/3 on Series S and 1.0 on Series X, so Series X with
-/// FidelityFX forced on renders at full 4K, which overflows its memory plan.
-/// Both of its scale loads (`vmovss xmm0, [rip+d]`) are pointed at our
+/// Debugging aid: `VICTORY_FFX_SCALE=<scale>,<hex rva>` sets the render
+/// scale of a title's FidelityFX path (0.5: 1080p for a 4K output, 0.6667:
+/// 1440p). The rva is title-specific and required: the scale loads of the
+/// method at <rva> (`vmovss xmm0, [rip+d]`, both of them) are pointed at our
 /// constant, kept in the padding after the method; with other code there,
 /// nothing is patched.
 #[cfg(all(windows, feature = "diagnostics"))]
@@ -241,7 +238,10 @@ fn ffx_scale(image: &victory_loader::LoadedImage) {
     let Ok(spec) = std::env::var("VICTORY_FFX_SCALE") else {
         return;
     };
-    let (scale, rva) = spec.split_once(',').unwrap_or((&spec, "28EF680"));
+    let Some((scale, rva)) = spec.split_once(',') else {
+        eprintln!("Sixth Star: VICTORY_FFX_SCALE={spec}: expected <scale in (0, 1]>,<hex rva>");
+        return;
+    };
     let scale = scale
         .trim()
         .parse::<f32>()
@@ -249,7 +249,7 @@ fn ffx_scale(image: &victory_loader::LoadedImage) {
         .filter(|s| *s > 0.0 && *s <= 1.0);
     let rva = usize::from_str_radix(rva.trim().trim_start_matches("0x"), 16).ok();
     let (Some(scale), Some(rva)) = (scale, rva) else {
-        eprintln!("Sixth Star: VICTORY_FFX_SCALE={spec}: expected <scale in (0, 1]>[,<hex rva>]");
+        eprintln!("Sixth Star: VICTORY_FFX_SCALE={spec}: expected <scale in (0, 1]>,<hex rva>");
         return;
     };
     if rva + FFX_SCALE_SPAN > image.info().size_of_image as usize {
