@@ -2,7 +2,7 @@
 # configuration, stops each run after a fixed time, reads the runtime's own
 # telemetry from each run's log and writes one comparison report.
 #
-#   ab.bat                                   baseline, resid, best, hot1024, cardbuf1
+#   ab.bat                                   baseline, seriess, seriessrt, seriessrtbest
 #   ab.bat -Configs baseline,hot512,hot2048 -Seconds 420 -SkipSeconds 180
 #   ab.bat -ParseOnly logs\run_20261126_230000.log,logs\run_20261126_231000.log
 #   ab.bat -Stability                        one run of 33 minutes (baseline, or the
@@ -39,6 +39,12 @@
 #   seriess        CONSOLE=series-s with VICTORY_FFX_SIMPLE=1 (the Series S
 #                  profile, 720p, with a bilinear upscale: no FidelityFX SDK needed)
 #   seriessbest    seriess with the best switches
+#   rtmiss         VICTORY_RT_MISS=1 (every ray-tracing node test answers a miss:
+#                  ray tracing off; a translation setting, so the first run with it
+#                  translates every program with ray tests again)
+#   seriessrt      seriess with VICTORY_RT_MISS=1 (the base of the fastest forks'
+#                  measurements, 2026-11-28)
+#   seriessrtbest  seriessrt with the best switches
 #   wide          VICTORY_WIDE_REFRESH=1 (refreshes on several threads)
 #   fills          VICTORY_WIDE_FILLS=1 (a list's fills on several threads; the default
 #                  since 2026-11-27)
@@ -61,7 +67,7 @@
 # Nothing here reads anything but the logs the runs write.
 [CmdletBinding()]
 param(
-    [string[]]$Configs = @('baseline', 'resid', 'best', 'hot1024', 'cardbuf1'),
+    [string[]]$Configs = @('baseline', 'seriess', 'seriessrt', 'seriessrtbest'),
     # How long each run lasts, from its start (loading included).
     [int]$Seconds = 300,
     # Frame lines before this many seconds after the first one are not
@@ -121,6 +127,9 @@ function Get-Overrides([string]$name) {
         '^texhot$' { return [ordered]@{ VICTORY_TEXTURE_FROM_COPY = '1'; VICTORY_WATCHED_ALLOC = '1'; VICTORY_HOT_SKIP = '1' } }
         '^seriess$' { return [ordered]@{ CONSOLE = 'series-s'; VICTORY_FFX_SIMPLE = '1' } }
         '^seriessbest$' { return [ordered]@{ CONSOLE = 'series-s'; VICTORY_FFX_SIMPLE = '1'; VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_TEXTURE_FROM_COPY = '1' } }
+        '^rtmiss$' { return [ordered]@{ VICTORY_RT_MISS = '1' } }
+        '^seriessrt$' { return [ordered]@{ CONSOLE = 'series-s'; VICTORY_FFX_SIMPLE = '1'; VICTORY_RT_MISS = '1' } }
+        '^seriessrtbest$' { return [ordered]@{ CONSOLE = 'series-s'; VICTORY_FFX_SIMPLE = '1'; VICTORY_RT_MISS = '1'; VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_TEXTURE_FROM_COPY = '1' } }
         '^wide$' { return [ordered]@{ VICTORY_WIDE_REFRESH = '1' } }
         '^fills$' { return [ordered]@{ VICTORY_WIDE_FILLS = '1' } }
         '^nofills$' { return [ordered]@{ VICTORY_WIDE_FILLS = '0' } }
@@ -165,15 +174,18 @@ function Read-Run([string]$log) {
     $r = [ordered]@{
         Log = $log; FrameLines = 0; Counted = 0; Errors = 0; Removed = 0; Panics = 0; Watchdog = 0
         Incomplete = New-Object System.Collections.Generic.List[double]
+        NotRunWhy = New-Object System.Collections.Generic.List[object]
+        Untranslated = 0; PipelinesMade = $null; PipelinesLoaded = $null; PipelinesEarly = $null
         Gpu = New-Object System.Collections.Generic.List[object]
         Vram = New-Object System.Collections.Generic.List[object]
         Residency = $null; Memory = $null; Session = $null; Startup = $null; Cpu = $null; Exit = $null
+        LongestStall = $null; LongestStallS = 0
         SessionS = $null; SessionFrames = $null; SessionFps = $null; SessionMs = $null; WorstFps = $null; LongestGap = $null; NotRun = $null
         LowestRamFree = $null; MenuLines = 0; Commit = $null
         FirstError = $null
     }
     $first = $null
-    $fl = '(?<fps>[\d.]+) fps, (?<ms>[\d.]+) ms/frame \((?<cpu>[\d.]+) preparing: copies (?<cms>[\d.]+) ms (?<cmb>[\d.]+) MB, textures (?<tms>[\d.]+) ms (?<tmb>[\d.]+) MB; (?<gpu>[\d.]+) on the GPU; (?<bms>[\d.]+) copying back (?<bmb>[\d.]+) MB\), (?<draws>[\d.]+) draws/frame, dropped (?<dropped>[\d.]+) without a host pipeline'
+    $fl = '(?<fps>[\d.]+) fps, (?<ms>[\d.]+) ms/frame \((?<cpu>[\d.]+) preparing: copies (?<cms>[\d.]+) ms (?<cmb>[\d.]+) MB, textures (?<tms>[\d.]+) ms (?<tmb>[\d.]+) MB; (?<gpu>[\d.]+) on the GPU; (?<bms>[\d.]+) copying back (?<bmb>[\d.]+) MB\), (?<draws>[\d.]+) draws/frame, (dropped (?<dropped>[\d.]+) without a host pipeline|not run (?<dropped>[\d.]+))'
     foreach ($raw in [IO.File]::ReadLines($log)) {
         $line = $raw -replace "$esc\[[0-9;]*m", ''
         $t = $null
@@ -190,6 +202,19 @@ function Read-Run([string]$log) {
             continue
         }
         if ($line -match 'INCOMPLETE FRAMES: draws and dispatches not run per frame: ([\d.]+)') { $r.Incomplete.Add([double]$Matches[1]) }
+        # The same line by reason: "598.5 no host pipeline, 3.0 draw not prepared (the frame ...".
+        if ($line -match 'INCOMPLETE FRAMES: draws and dispatches not run per frame: (.*?) \(the frame') {
+            $list = $Matches[1]
+            $why = [ordered]@{ T = $t }
+            foreach ($part in ($list -split ', ')) { if ($part -match '^([\d.]+) (.+)$') { $why[$Matches[2]] = [double]$Matches[1] } }
+            $r.NotRunWhy.Add([pscustomobject]$why)
+        }
+        if ($line -match 'shader does not translate') { $r.Untranslated++ }
+        if ($line -match 'host pipeline library saved') {
+            if ($line -match '\bmade=(\d+)') { $r.PipelinesMade = [int64]$Matches[1] }
+            if ($line -match '\bloaded=(\d+)') { $r.PipelinesLoaded = [int64]$Matches[1] }
+            if ($line -match '\bstarted_early=(\d+)') { $r.PipelinesEarly = [int64]$Matches[1] }
+        }
         if ($line -match 'GPU timestamps per frame \(ms\): the title''s work ([\d.]+), ours ([\d.]+) .*busy span ([\d.]+) of ([\d.]+) waited for the fence') {
             $r.Gpu.Add([pscustomobject]@{ T = $t; Title = [double]$Matches[1]; Ours = [double]$Matches[2]; Busy = [double]$Matches[3]; Wall = [double]$Matches[4] })
         }
@@ -223,6 +248,13 @@ function Read-Run([string]$log) {
         if ($line -match '(startup: .*)$') { $r.Startup = $Matches[1] }
         if ($line -match '(CPU time per frame in measured work.*)$') { $r.Cpu = $Matches[1] }
         if ($line -match 'watchdog: ') { $r.Watchdog++ }
+        # The longest stall the watchdog reported, as it reported it: what
+        # the submissions, the queues, the title's fence waits and the
+        # pipeline workers stood at.
+        if ($line -match 'watchdog: (nothing presented for ([\d.]+) s.*)$' -and [double]$Matches[2] -gt $r.LongestStallS) {
+            # Without the pipelines' shader hashes: the report holds none of a title's.
+            $r.LongestStallS = [double]$Matches[2]; $r.LongestStall = $Matches[1] -replace '\b[0-9a-f]{16}\b', '<hash>'
+        }
         if ($line -match '^\S*\s+ERROR |^Error: ') { $r.Errors++; if (-not $r.FirstError) { $r.FirstError = $line } }
         if ($line -match '(?i)device (was )?removed|device went|DEVICE_REMOVED|DXGI_ERROR_DEVICE') { $r.Removed++ }
         if ($line -match 'panicked at') { $r.Panics++; if (-not $r.FirstError) { $r.FirstError = $line } }
@@ -290,6 +322,18 @@ function Read-Run([string]$log) {
     $r.RamFreeLowest = if ($free.Count) { ($free | Measure-Object -Minimum).Minimum } else { $r.LowestRamFree }
     $r.VramPeak = if ($r.Vram.Count) { ($r.Vram | Measure-Object Used -Maximum).Maximum } else { $null }
     $r.IncompleteLast = if ($r.Incomplete.Count) { $r.Incomplete[$r.Incomplete.Count - 1] } else { 0 }
+    # Draws and dispatches not run, by reason: the mean per gameplay frame
+    # line (a line with no INCOMPLETE line beside it counts 0), and in how
+    # many lines each reason came up.
+    $why = @($r.NotRunWhy | Where-Object { (-not $first -or ($_.T -and $_.T -ge $first.AddSeconds($SkipSeconds))) -and (& $inGameplay $_.T) })
+    $r.NotRunMean = [ordered]@{}
+    $names = @($why | ForEach-Object { $_.PSObject.Properties.Name } | Where-Object { $_ -ne 'T' } | Sort-Object -Unique)
+    $lines = [math]::Max($counted.Count, $why.Count)
+    foreach ($n in $names) {
+        $with = @($why | Where-Object { $null -ne $_.$n -and $_.$n -gt 0 })
+        $sum = ($with | ForEach-Object { [double]$_.$n } | Measure-Object -Sum).Sum
+        $r.NotRunMean[$n] = [pscustomobject]@{ Mean = $(if ($lines) { $sum / $lines } else { $null }); Lines = $with.Count }
+    }
     return [pscustomobject]$r
 }
 
@@ -327,8 +371,14 @@ function Write-Report($runs, [string]$path, $info) {
         @('copying back, ms (MB)', { param($x) "$(F $x.Run.Median.BackMs) ($(F $x.Run.Median.BackMb))" }),
         @('GPU timestamps: title / ours / busy of wall, ms', { param($x) "$(F $x.Run.GpuMedian.Title) / $(F $x.Run.GpuMedian.Ours) / $(F $x.Run.GpuMedian.Busy) of $(F $x.Run.GpuMedian.Wall)" }),
         @('draws/frame', { param($x) F $x.Run.Median.Draws '{0:N0}' }),
-        @('dropped without a pipeline/frame', { param($x) F $x.Run.Median.Dropped }),
+        @('draws and dispatches not run/frame (every reason; logs before 2026-11-28 call it "dropped without a host pipeline")', { param($x) F $x.Run.Median.Dropped }),
         @('INCOMPLETE FRAMES (lines; last per frame)', { param($x) "$($x.Run.Incomplete.Count); $(F $x.Run.IncompleteLast)" }),
+        @('  not run per frame by reason (mean of gameplay lines; lines with it)', { param($x)
+                if (-not $x.Run.NotRunMean -or $x.Run.NotRunMean.Count -eq 0) { 'none' }
+                else { ($x.Run.NotRunMean.GetEnumerator() | ForEach-Object { "$($_.Key) $(F $_.Value.Mean) ($($_.Value.Lines))" }) -join '; ' }
+            }),
+        @('shaders that do not translate (log lines)', { param($x) "$($x.Run.Untranslated)" }),
+        @('host pipelines made / loaded from the library / started early (last save)', { param($x) "$(F $x.Run.PipelinesMade '{0:N0}') / $(F $x.Run.PipelinesLoaded '{0:N0}') / $(F $x.Run.PipelinesEarly '{0:N0}')" }),
         @('VRAM used of budget, GiB (peak)', { param($x) "$(F $x.Run.VramMedian.Used '{0:N2}') of $(F $x.Run.VramMedian.Budget '{0:N2}') ($(F $x.Run.VramPeak '{0:N2}'))" }),
         @('shared GPU memory, GiB', { param($x) F $x.Run.VramMedian.Shared '{0:N2}' }),
         @('the PC''s memory free, GiB (lowest of the run)', { param($x) "$(F $x.Run.VramMedian.RamFree) ($(F $x.Run.RamFreeLowest)) of $(F $x.Run.VramMedian.RamTotal)" }),
@@ -356,7 +406,7 @@ function Write-Report($runs, [string]$path, $info) {
         $out.Add('')
         $out.Add("- log: $($x.Run.Log)")
         if ($x.Run.Series) { $out.Add("- ms/frame by 30 s from the first frame line: $($x.Run.Series)") }
-        foreach ($p in @('Session', 'Startup', 'Residency', 'Memory', 'Cpu', 'FirstError')) {
+        foreach ($p in @('Session', 'Startup', 'Residency', 'Memory', 'Cpu', 'LongestStall', 'FirstError')) {
             if ($x.Run.$p) { $out.Add("- last ${p}: ``$($x.Run.$p)``") }
         }
     }
@@ -429,6 +479,7 @@ if ($ParseOnly.Count) {
         [pscustomobject]@{ Name = (Get-Name $name); Overrides = (Get-Overrides $name); Run = (Read-Run (Resolve-Path $logs[$i]).Path); Seconds = $null; Stopped = $null }
     }
     if (-not $OutDir) { $OutDir = Split-Path -Parent (Resolve-Path $logs[0]).Path }
+    $null = New-Item -ItemType Directory -Force $OutDir
     $now = Get-Build
     $now['commit'] = "$($now['commit']) now (logs read afterwards: each run's own commit is in the table when its log names it)"
     Write-Report $runs (Join-Path $OutDir 'ab-report.md') $now
@@ -497,7 +548,8 @@ try {
         # setting in run.config.bat does not leak into another configuration.
         foreach ($v in @('VICTORY_HOT_WINDOWS_MB', 'VICTORY_RESIDENCY', 'VICTORY_PROMOTE', 'VICTORY_RELAY', 'VICTORY_LATE_WAIT',
                 'VICTORY_CARD_BUFFERS_MIN_MB', 'VICTORY_CARD_BUFFERS_MB', 'VICTORY_WIDE_REFRESH', 'VICTORY_WIDE_FILLS', 'VICTORY_KEEP_SNAPSHOTS', 'VICTORY_BACK_NOTE',
-                'VICTORY_TEXTURE_FROM_COPY', 'VICTORY_PLAIN_COPY', 'VICTORY_WATCHED_ALLOC', 'VICTORY_HOT_SKIP', 'CONSOLE', 'VICTORY_FFX_SIMPLE')) {
+                'VICTORY_TEXTURE_FROM_COPY', 'VICTORY_PLAIN_COPY', 'VICTORY_WATCHED_ALLOC', 'VICTORY_HOT_SKIP', 'CONSOLE', 'VICTORY_FFX_SIMPLE',
+                'VICTORY_RT_MISS', 'RT_MISS')) {
             if (-not $over.Contains($v)) { $lines += "set `"$v=`"" }
         }
         foreach ($k in $over.Keys) { $lines += "set `"$k=$($over[$k])`"" }
