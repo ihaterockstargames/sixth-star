@@ -1600,7 +1600,7 @@ impl<'a> Lower<'a> {
             interps: {
                 let mut m: HashMap<Site, &Interp> = x.io.interps.iter().map(|(s, i)| (*s, i)).collect();
                 // A first half whose result is also read as data (an f16 second half keeps
-                // the other half of its dst, PS_DeferredTextured): evaluated as the pair it
+                // the other half of its dst, in a pixel program of the test title): evaluated as the pair it
                 // starts. Approximate for those other bits (P0 + i P10 on the console); a
                 // first half only the second half reads is gone before lowering.
                 if std::env::var_os("VICTORY_FIRST_HALF").is_none_or(|v| v != "0") {
@@ -10917,7 +10917,7 @@ impl<'a> Lower<'a> {
         // exit (a count read from a buffer the host has not got yet, say)
         // runs to the limit in every lane. A million iterations a pixel
         // hung the GPU for seconds a draw until Windows reset it
-        // (PS_Textured_Eight, 2026-11-24, run 12).
+        // (a pixel program of the test title, 2026-11-24, run 12).
         // shortcut: a pixel loop past 128 iterations, a vertex or mesh loop
         // past 256 or a compute loop past 4,096 is cut short. (They were
         // 1,024, 4,096 and 65,536: the opening cutscene then lost the card
@@ -11207,8 +11207,8 @@ mod tests {
             usage: 0,
             half: true,
         };
-        // MS_VS_PedTransformPreSkinD_Packed 005fe88ec1bdc0c7 and its pixel
-        // shader 93667197d3d05e1c: TEXCOORD6 is one value at register 4
+        // A mesh program of the test title and its pixel
+        // shader: TEXCOORD6 is one value at register 4
         // column 3; parameter 3 (rows 6 and 7) carries it in dword 3.
         let sig = vec![
             element(1, 2, 0, 4),
@@ -11245,7 +11245,7 @@ mod tests {
         assert_eq!(at(9, 4), Some((10, 0)));
         assert_eq!(at(12, 3), Some((12, 3)));
         assert_eq!(at(12, 4), None);
-        // The common layout (29805d23a495cdf8): TEXCOORD7 is two values at
+        // The common layout: TEXCOORD7 is two values at
         // register 1 columns 2-3; parameter 0 is TEXCOORD0, TEXCOORD1,
         // TEXCOORD7.
         let sig = vec![

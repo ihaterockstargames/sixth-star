@@ -927,7 +927,7 @@ mod tests {
         assert_eq!(slot::<extern "system" fn(This) -> u32>(p, 0x10)(p), 0);
     }
 
-    /// The stream layout the title builds (title+0x86f090): root
+    /// The stream layout the title builds: root
     /// signature, five shader slots (the first a mesh shader), blend, sample
     /// mask, rasterizer, depth-stencil 1, sample description, input layout,
     /// topology, render target and depth formats: 0x2b0 bytes.

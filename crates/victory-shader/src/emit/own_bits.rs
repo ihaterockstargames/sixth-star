@@ -791,8 +791,8 @@ mod tests {
 
     const ADD_BIT_NUMBER: u32 = 0x4A0A_0A0A; // v_add_nc_u32 v5, s10, v5
 
-    /// The title's scalarised light loop (`indirect_light_probes:CS_IrradianceCache_Shade`,
-    /// 0x71f8 on), in small: the wave OR of v7 in s7, a loop over its bits with the lowest
+    /// The title's scalarised light loop (in a compute program of its indirect
+    /// light), in small: the wave OR of v7 in s7, a loop over its bits with the lowest
     /// one's number in s10 and the bit in s11, and `body` for the lanes whose v7 has the bit
     /// (`own`) or for every lane; `latch` runs in every lane after the body, `after` after
     /// the loop.

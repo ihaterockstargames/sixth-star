@@ -340,7 +340,7 @@ fn unspill(
     // restore of the next lane into the next register.
     // The second save may come any number of instructions after the first (the
     // compiler puts loads and constants between the two: five instructions later
-    // in the ped mesh programs). Only wave64 programs have pairs: a wave32 mask
+    // in the character mesh programs). Only wave64 programs have pairs: a wave32 mask
     // is one dword, and a pair move of it with its neighbour would hide it.
     let mut slots: Vec<(u8, u32)> = parks.iter().flatten().map(|p| (p.1, p.3)).collect();
     slots.sort_unstable();

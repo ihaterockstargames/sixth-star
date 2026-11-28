@@ -427,12 +427,12 @@ mod command_tests {
     fn commands_are_named_by_their_pipeline() {
         use super::command_key;
         assert_eq!(
-            command_key("dispatch 182x1x1 [compute 24f989b98dcb03f0] | 24f989b98dcb03f0: u4=0xa6b080 [heap 341380: x]"),
-            "dispatch [compute 24f989b98dcb03f0]"
+            command_key("dispatch 182x1x1 [compute 0123456789abcdef] | 0123456789abcdef: u4=0x1000 [heap 7: x]"),
+            "dispatch [compute 0123456789abcdef]"
         );
         assert_eq!(
-            command_key("indirect kind 10 max 1 at 0xd9358fce0 [mesh 0750cb2d975c7563, pixel 085d374c5a795549] | t"),
-            "indirect [mesh 0750cb2d975c7563, pixel 085d374c5a795549]"
+            command_key("indirect kind 10 max 1 at 0x10000 [mesh 1111222233334444, pixel 5555666677778888] | t"),
+            "indirect [mesh 1111222233334444, pixel 5555666677778888]"
         );
         assert_eq!(command_key("texture upload 0x271b61c28b0 (2048x2048x1 f99 mips 10) sub 0"), "texture upload");
         assert_eq!(command_key("alias copy of 0x26f66aca780 into 0x26fbdc93890"), "alias copy");
