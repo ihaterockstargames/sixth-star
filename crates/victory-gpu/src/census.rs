@@ -8,6 +8,12 @@
 //! from watching a few frames. Before any copy-back is moved to "on demand",
 //! this census says how much of what we copy back and refresh lies in each
 //! kind, from the title's own run. It changes nothing.
+//!
+//! Views of physical pages are counted apart, and among them those that lie
+//! in a reservation the title asked write-combined: such a reservation's
+//! protection is what says the CPU does not read it, views mapped into it
+//! included (as foxhound by readmet3xt-lab, GPL-3.0-or-later, reads it for
+//! its `VICTORY_WC_NO_BACK`; the idea only, written anew here).
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -19,15 +25,26 @@ pub(crate) enum Kind {
     Cached = 0,
     WriteCombined = 1,
     Uncached = 2,
-    /// A view of physical pages (their own kind is set per page; counted apart).
+    /// A view of physical pages (their own kind is set per page; counted
+    /// apart), in a reservation not asked write-combined or in none seen.
     PhysicalView = 3,
+    /// A view of physical pages in a reservation the title asked
+    /// write-combined.
+    PhysicalViewWc = 4,
     /// Memory the runtime did not see reserved (another allocator, or before
     /// the census).
-    Unknown = 4,
+    Unknown = 5,
 }
 
-const KINDS: usize = 5;
-const NAMES: [&str; KINDS] = ["cached", "write-combined", "uncached", "physical-page views", "unknown"];
+const KINDS: usize = 6;
+const NAMES: [&str; KINDS] = [
+    "cached",
+    "write-combined",
+    "uncached",
+    "physical-page views",
+    "physical-page views (write-combined reservation)",
+    "unknown",
+];
 
 /// What moved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,27 +74,36 @@ pub(crate) fn kind_of_protect(console_protect: u32) -> Kind {
     }
 }
 
+type Map = BTreeMap<usize, (usize, Kind)>;
+
 /// Title ranges by start: (end, kind).
-static RANGES: Mutex<BTreeMap<usize, (usize, Kind)>> = Mutex::new(BTreeMap::new());
+static RANGES: Mutex<Map> = Mutex::new(BTreeMap::new());
+
+/// The reservations alone, as [`RANGES`] holds them before views of
+/// physical pages are mapped into them: the kind a view takes from the
+/// reservation it lies in. Locked after [`RANGES`] when both are.
+static RESERVED: Mutex<Map> = Mutex::new(BTreeMap::new());
 
 static BYTES: [[AtomicU64; KINDS]; FLOWS] = [const { [const { AtomicU64::new(0) }; KINDS] }; FLOWS];
 
 /// The runtime reserved `[at, at + len)` with the console's protection.
 pub fn title_memory_kind(at: usize, len: usize, console_protect: u32) {
-    set(at, len, kind_of_protect(console_protect));
+    let kind = kind_of_protect(console_protect);
+    put(&mut RANGES.lock().unwrap_or_else(|e| e.into_inner()), at, len, kind);
+    put(&mut RESERVED.lock().unwrap_or_else(|e| e.into_inner()), at, len, kind);
 }
 
 /// The runtime mapped a view of physical pages at `[at, at + len)`.
 pub(crate) fn physical_view(at: usize, len: usize) {
-    set(at, len, Kind::PhysicalView);
+    put(&mut RANGES.lock().unwrap_or_else(|e| e.into_inner()), at, len, Kind::PhysicalView);
 }
 
-fn set(at: usize, len: usize, kind: Kind) {
+/// `[at, at + len)` is `kind` in `r`.
+fn put(r: &mut Map, at: usize, len: usize, kind: Kind) {
     if len == 0 {
         return;
     }
     let end = at.saturating_add(len);
-    let mut r = RANGES.lock().unwrap_or_else(|e| e.into_inner());
     // What it covers is replaced; ranges crossing its ends are cut.
     let crossing: Vec<(usize, usize, Kind)> = r
         .range(..end)
@@ -101,20 +127,42 @@ fn set(at: usize, len: usize, kind: Kind) {
 pub(crate) fn split(at: usize, len: usize) -> Vec<(Kind, u64)> {
     let end = at.saturating_add(len);
     let r = RANGES.lock().unwrap_or_else(|e| e.into_inner());
+    let reserved = RESERVED.lock().unwrap_or_else(|e| e.into_inner());
     let mut out = Vec::new();
     let mut known = 0u64;
     let first = r.range(..=at).next_back().map_or(at, |(&s, _)| s);
     for (&s, &(e, k)) in r.range(first..end) {
         let (lo, hi) = (s.max(at), e.min(end));
         if lo < hi {
-            out.push((k, (hi - lo) as u64));
-            known += (hi - lo) as u64;
+            let bytes = (hi - lo) as u64;
+            if k == Kind::PhysicalView {
+                // Views in write-combined reservations apart.
+                let wc = covered(&reserved, lo, hi, Kind::WriteCombined);
+                if wc > 0 {
+                    out.push((Kind::PhysicalViewWc, wc));
+                }
+                if bytes > wc {
+                    out.push((Kind::PhysicalView, bytes - wc));
+                }
+            } else {
+                out.push((k, bytes));
+            }
+            known += bytes;
         }
     }
     if (len as u64) > known {
         out.push((Kind::Unknown, len as u64 - known));
     }
     out
+}
+
+/// The bytes of `[lo, hi)` that `r` holds as `kind`.
+fn covered(r: &Map, lo: usize, hi: usize, kind: Kind) -> u64 {
+    let first = r.range(..=lo).next_back().map_or(lo, |(&s, _)| s);
+    r.range(first..hi)
+        .filter(|(_, (_, k))| *k == kind)
+        .map(|(&s, &(e, _))| e.min(hi).saturating_sub(s.max(lo)) as u64)
+        .sum()
 }
 
 /// `len` bytes at `at` moved as `flow`.
@@ -192,6 +240,31 @@ mod tests {
                 (Kind::Unknown, 0x2000),
             ]
         );
+    }
+
+    /// A view of physical pages counts as one in a write-combined
+    /// reservation for the part of it that lies in one, and as a plain view
+    /// for the rest; what is around it keeps its reservation's kind.
+    #[test]
+    fn views_in_write_combined_reservations_are_counted_apart() {
+        let b = BASE + 0x20_0000;
+        title_memory_kind(b, 0x4000, 0x2404);
+        title_memory_kind(b + 0x4000, 0x2000, 0x04);
+        physical_view(b + 0x1000, 0x4000);
+        assert_eq!(
+            split(b, 0x7000),
+            [
+                (Kind::WriteCombined, 0x1000),
+                (Kind::PhysicalViewWc, 0x3000),
+                (Kind::PhysicalView, 0x1000),
+                (Kind::Cached, 0x1000),
+                (Kind::Unknown, 0x1000),
+            ]
+        );
+        // A new reservation over a view gives its range its own kind again.
+        title_memory_kind(b + 0x1000, 0x1000, 0x04);
+        assert_eq!(split(b + 0x1000, 0x2000), [(Kind::Cached, 0x1000), (Kind::PhysicalViewWc, 0x1000)]);
+        assert_eq!(covered(&RESERVED.lock().unwrap(), b, b + 0x4000, Kind::WriteCombined), 0x3000);
     }
 
     #[test]

@@ -175,6 +175,7 @@ function Read-Run([string]$log) {
         Log = $log; FrameLines = 0; Counted = 0; Errors = 0; Removed = 0; Panics = 0; Watchdog = 0
         Incomplete = New-Object System.Collections.Generic.List[double]
         NotRunWhy = New-Object System.Collections.Generic.List[object]
+        Census = New-Object System.Collections.Generic.List[object]
         Untranslated = 0; PipelinesMade = $null; PipelinesLoaded = $null; PipelinesEarly = $null
         Gpu = New-Object System.Collections.Generic.List[object]
         Vram = New-Object System.Collections.Generic.List[object]
@@ -208,6 +209,16 @@ function Read-Run([string]$log) {
             $why = [ordered]@{ T = $t }
             foreach ($part in ($list -split ', ')) { if ($part -match '^([\d.]+) (.+)$') { $why[$Matches[2]] = [double]$Matches[1] } }
             $r.NotRunWhy.Add([pscustomobject]$why)
+        }
+        # Copy-back and refreshes by the console's memory kind (census.rs): "copy-back
+        # compared [cached 1.2, write-combined 3.4], copied back [...]; host copies refreshed [...]".
+        if ($line -match 'Gen 2 census, MB per frame by the console''s memory kind: copy-back compared \[(.*?)\], copied back \[(.*?)\]; host copies refreshed \[(.*?)\]') {
+            $c = [ordered]@{ T = $t }
+            $flows = @(@('compared', $Matches[1]), @('back', $Matches[2]), @('refreshed', $Matches[3]))
+            foreach ($flow in $flows) {
+                foreach ($part in ($flow[1] -split ', ')) { if ($part -match '^(.+) ([\d.]+)$') { $c["$($flow[0])|$($Matches[1])"] = [double]$Matches[2] } }
+            }
+            $r.Census.Add([pscustomobject]$c)
         }
         if ($line -match 'shader does not translate') { $r.Untranslated++ }
         if ($line -match 'host pipeline library saved') {
@@ -334,10 +345,27 @@ function Read-Run([string]$log) {
         $sum = ($with | ForEach-Object { [double]$_.$n } | Measure-Object -Sum).Sum
         $r.NotRunMean[$n] = [pscustomobject]@{ Mean = $(if ($lines) { $sum / $lines } else { $null }); Lines = $with.Count }
     }
+    # The census by memory kind: the median of the gameplay lines for each
+    # flow and kind (a kind a line leaves out moved 0 MB in it).
+    $cen = @($r.Census | Where-Object { (-not $first -or ($_.T -and $_.T -ge $first.AddSeconds($SkipSeconds))) -and (& $inGameplay $_.T) })
+    $r.CensusLines = $cen.Count
+    $r.CensusMedian = [ordered]@{}
+    $keys = @($cen | ForEach-Object { $_.PSObject.Properties.Name } | Where-Object { $_ -ne 'T' } | Sort-Object -Unique)
+    foreach ($k in $keys) {
+        $r.CensusMedian[$k] = Get-Median (@($cen | ForEach-Object { if ($null -ne $_.$k) { [double]$_.$k } else { 0.0 } }))
+    }
     return [pscustomobject]$r
 }
 
 function F($v, [string]$fmt = '{0:N1}') { if ($null -eq $v) { 'n/a' } else { $fmt -f $v } }
+
+# One flow of the census by memory kind, for a report cell: "write-combined 30.1, cached 2.0 (lines)".
+function Get-CensusCell($r, [string]$flow) {
+    if (-not $r.CensusLines) { return 'no census line' }
+    $parts = @($r.CensusMedian.GetEnumerator() | Where-Object { $_.Key -like "$flow|*" } | Sort-Object { - $_.Value } |
+            ForEach-Object { "$($_.Key.Substring($flow.Length + 1)) $(F $_.Value)" })
+    if ($parts.Count) { "$($parts -join ', ') ($($r.CensusLines))" } else { "none ($($r.CensusLines))" }
+}
 
 function Write-Report($runs, [string]$path, $info) {
     $out = New-Object System.Collections.Generic.List[string]
@@ -369,6 +397,9 @@ function Write-Report($runs, [string]$path, $info) {
         @('  of it textures, ms', { param($x) F $x.Run.Median.TexMs }),
         @('on the GPU (fence wait), ms', { param($x) F $x.Run.Median.Gpu }),
         @('copying back, ms (MB)', { param($x) "$(F $x.Run.Median.BackMs) ($(F $x.Run.Median.BackMb))" }),
+        @('  census by memory kind, MB/frame: compared for copy-back (lines)', { param($x) Get-CensusCell $x.Run 'compared' }),
+        @('  census: copied back', { param($x) Get-CensusCell $x.Run 'back' }),
+        @('  census: host copies refreshed', { param($x) Get-CensusCell $x.Run 'refreshed' }),
         @('GPU timestamps: title / ours / busy of wall, ms', { param($x) "$(F $x.Run.GpuMedian.Title) / $(F $x.Run.GpuMedian.Ours) / $(F $x.Run.GpuMedian.Busy) of $(F $x.Run.GpuMedian.Wall)" }),
         @('draws/frame', { param($x) F $x.Run.Median.Draws '{0:N0}' }),
         @('draws and dispatches not run/frame (every reason; logs before 2026-11-28 call it "dropped without a host pipeline")', { param($x) F $x.Run.Median.Dropped }),
@@ -440,7 +471,7 @@ function Write-Report($runs, [string]$path, $info) {
             [ordered]@{
                 name = $x.Name; settings = $x.Overrides; commit = $r.Commit; log = $r.Log
                 frameLines = $r.FrameLines; counted = $r.Counted; menuLines = $r.MenuLines
-                median = $r.Median; worstMs = $r.WorstMs; gpu = $r.GpuMedian; vram = $r.VramMedian
+                median = $r.Median; worstMs = $r.WorstMs; gpu = $r.GpuMedian; vram = $r.VramMedian; census = $r.CensusMedian
                 vramPeak = $r.VramPeak; ramFreeLowest = $r.RamFreeLowest
                 errors = $r.Errors; removed = $r.Removed; panics = $r.Panics; watchdog = $r.Watchdog
                 incompleteLines = $r.Incomplete.Count; incompleteLast = $r.IncompleteLast
