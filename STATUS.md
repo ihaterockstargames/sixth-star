@@ -1,7 +1,7 @@
 # Sixth Star — test status
 
-Last updated: 2026-11-27
-Build measured: `b5efb43`. Defaults changed since: `e847242` (texture fallback off again, see Settings); not measured on the title yet
+Last updated: 2026-11-28
+Build measured: `b5efb43`. Defaults changed since: `e847242` (texture fallback off again) and `ae1ceaf` (wide fills on), see Settings; neither is measured on the title yet
 Binary: sixth-star.exe
 
 Sixth Star is a general Windows compatibility layer for Xbox Series X|S GDK
