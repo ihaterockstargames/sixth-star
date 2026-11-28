@@ -306,6 +306,31 @@ Cycles 27 to 29, 2026-11-28 (night run):
   write-watched, so their refreshes copy them whole. Whether the test
   title's buffers are watched is not measured here.
 
+Cycles 30 to 32, 2026-11-28 (night run):
+
+- Cycles 30 and 32 (full, `b10bd53` and `51cab58`): all green, 673 and
+  674 tests passed, every synthetic byte right, every picture right (9 of
+  9 in cycle 32).
+- `51cab58`: the stand-in's committed buffers get their memory from the
+  runtime's default allocator, which took it from the host heap, where no
+  write watch is possible. With `VICTORY_WATCHED_ALLOC=1` large blocks of
+  that allocator are write-watched reservations of their own, so the
+  refreshes copy only the pages written. **Off by default.** `texcopy`
+  with and without the switch, 8 buffers of 3 MB:
+
+| Rewritten per frame | CPU preparing, ms (off -> on) | Copies, MB/frame (off -> on) | The stand-in's frame, ms (off -> on) | Picture |
+|---|---|---|---|---|
+| 10% (two runs) | 2.5 -> 0.3 / 0.3 | 24.6 -> 2.6 | 5.2 -> 3.3 / 3.2 | right |
+| 100% | 2.6 -> 3.2 | 24.6 -> 24.6 | 10.8 -> 15.6 | right |
+
+  Buffers rewritten whole get slower with the switch: the runtime asks
+  the write watch 13 times a frame instead of 5, and the stand-in's own
+  writes cost more after each reset of the watch. A default needs the
+  runtime to stop asking for buffers it keeps finding wholly written.
+  The test title hooks the allocator, so whether the switch reaches its
+  buffers is not measured. `ab.bat` has the configurations `watched` and
+  `texwatched` for that.
+
 ## Where the frame time goes (2026-11-26, gameplay)
 
 Gameplay, measured by the maintainer from the runner's frame line on 2026-11-26:
@@ -362,6 +387,7 @@ Task Manager figures were not taken for this run.
 | 2026-11-27 | `dfec235` | the runner runs `copies16` (16 buffers) by default: CPU preparing 2.7 ms, picture right; `VICTORY_WIDE_REFRESH=1` in the synthetic frame model only ~5% less CPU preparing, so it stays off | automated, on the stand-in title and a synthetic model (no game) |
 | 2026-11-27 | `19ea118` | stand-in title, 8 buffers: `texcopy` CPU preparing 2.6-2.7 -> 1.7-1.8 ms with `VICTORY_PLAIN_COPY=1`, 16 buffers 5.5 -> 3.5 ms; same GPU work and picture; default unchanged | automated night run, on the stand-in title (no game) |
 | 2026-11-28 | `f7e2ce5` | the stand-in can rewrite part of its buffers (`TEST_TITLE_DIRTY`); with 10% rewritten the runtime still copies all 24.6 MB a frame (CPU preparing unchanged: 1.3 ms `baseline`, 2.6 ms `texcopy`); 673 tests passed, 8 of 8 pictures right | automated night run, on the stand-in title (no game) |
+| 2026-11-28 | `51cab58` | stand-in title, 8 buffers, 10% rewritten: `texcopy` CPU preparing 2.5 -> 0.3 ms and 24.6 -> 2.6 MB copied a frame with `VICTORY_WATCHED_ALLOC=1` (two runs); whole buffers 2.6 -> 3.2 ms, so off by default; 674 tests passed, 9 of 9 pictures right | automated night run, on the stand-in title (no game) |
 | 2026-11-27 | `e847242` | texture fallback off by default again; the PC's memory on the frame line; `ab.bat` counts gameplay frame lines only | not measured on the title yet |
 | 2026-11-27 | `b5efb43` | stability run (`best` switches): ended by itself after a session of about 6 min (exit code 1), gameplay ~0.2 FPS | from the runner's lines; no error, device removal or panic logged; seen as a crash by the maintainer |
 | 2026-11-27 | `b5efb43` | gameplay ~0.7 FPS (median 1,438.3 ms/frame) with the defaults (fallback on); ~0.9 FPS (1,076.4 ms/frame) with `VICTORY_TEXTURE_FROM_COPY=1` | measured by the maintainer with `ab.bat` (gameplay frame lines only, from 120 s on, one run each); slower than 2026-11-26; no errors, device removals or panics; sometimes missing textures (user-reported) |
