@@ -354,6 +354,22 @@ Cycles 33 to 36, 2026-11-28 (night run):
   (the cause is not measured yet). `ab.bat` has the configuration
   `texhot`.
 
+Cycles 37 and 38, 2026-11-28 (night run):
+
+- Cycle 37 (full, `f38aa48`): **one test failed**,
+  `watch::tests::written_pages_are_reported_to_every_asker` (2 of 6
+  reruns). The test assumed a fresh allocation has no entries in the
+  write-watch journal, which all tests share; a block freed by another
+  test at the same address had left some. The runtime was right (old
+  entries only make a copy a superset). Fixed in the test (`e576557`):
+  0 of 8 reruns fail.
+- `78458bc`: the debugging aids `VICTORY_UPSCALER` and
+  `VICTORY_FFX_SCALE` no longer name title-specific code offsets;
+  `VICTORY_FFX_SCALE` now needs its rva.
+- Cycle 38 (full, both changes): all green, 676 tests passed, every
+  synthetic byte right, 8 of 8 pictures right, no cost changed by 10% or
+  more against cycle 37. Defaults unchanged.
+
 ## Where the frame time goes (2026-11-26, gameplay)
 
 Gameplay, measured by the maintainer from the runner's frame line on 2026-11-26:
@@ -412,6 +428,7 @@ Task Manager figures were not taken for this run.
 | 2026-11-28 | `f7e2ce5` | the stand-in can rewrite part of its buffers (`TEST_TITLE_DIRTY`); with 10% rewritten the runtime still copies all 24.6 MB a frame (CPU preparing unchanged: 1.3 ms `baseline`, 2.6 ms `texcopy`); 673 tests passed, 8 of 8 pictures right | automated night run, on the stand-in title (no game) |
 | 2026-11-28 | `51cab58` | stand-in title, 8 buffers, 10% rewritten: `texcopy` CPU preparing 2.5 -> 0.3 ms and 24.6 -> 2.6 MB copied a frame with `VICTORY_WATCHED_ALLOC=1` (two runs); whole buffers 2.6 -> 3.2 ms, so off by default; 674 tests passed, 9 of 9 pictures right | automated night run, on the stand-in title (no game) |
 | 2026-11-28 | `d130c10` | stand-in title, 8 buffers rewritten whole, `texcopy` with `VICTORY_WATCHED_ALLOC=1`: write watch 0.35 -> 0.08 ms a frame and CPU preparing 3.3 -> 3.0 ms with `VICTORY_HOT_SKIP=1` (two runs); off by default; 676 tests passed, 10 of 10 pictures right | automated night run, on the stand-in title (no game) |
+| 2026-11-28 | `78458bc` | a flaky test fixed (`e576557`, a shared journal left entries from a freed block); the debugging aids no longer name title-specific code offsets; 676 tests passed, 8 of 8 pictures right, defaults unchanged | automated night run, on the stand-in title (no game) |
 | 2026-11-27 | `e847242` | texture fallback off by default again; the PC's memory on the frame line; `ab.bat` counts gameplay frame lines only | not measured on the title yet |
 | 2026-11-27 | `b5efb43` | stability run (`best` switches): ended by itself after a session of about 6 min (exit code 1), gameplay ~0.2 FPS | from the runner's lines; no error, device removal or panic logged; seen as a crash by the maintainer |
 | 2026-11-27 | `b5efb43` | gameplay ~0.7 FPS (median 1,438.3 ms/frame) with the defaults (fallback on); ~0.9 FPS (1,076.4 ms/frame) with `VICTORY_TEXTURE_FROM_COPY=1` | measured by the maintainer with `ab.bat` (gameplay frame lines only, from 120 s on, one run each); slower than 2026-11-26; no errors, device removals or panics; sometimes missing textures (user-reported) |
