@@ -98,6 +98,17 @@ minutes or more without a crash; that has not been reached or measured.
   pieces, before the next step of another kind. `VICTORY_WIDE_FILLS=0`
   turns it off. Measured only on the stand-in title (see "Automated runs");
   not measured on the test title yet.
+- Ray tracing off (since `9f16e6d`, **off by default**): `RT_MISS=1` in
+  `run.config.bat` (or `VICTORY_RT_MISS=1`) makes every ray-tracing node test
+  answer "nothing hit" without reading memory, so the title's rays take its
+  own miss path: no ray-traced shadows, reflections or indirect light, and
+  less work for the card. With the structure builder off (the default), the
+  tests read memory that holds no structure; another fork on the same base
+  reports garbage shadows from that. A translation setting: the first run
+  with it translates the shaders with ray tests again. `ab.bat` runs it as
+  `rtmiss`, `seriessrt` and `seriessrtbest` (since `08c0eb9`, `ab.bat`'s
+  default runs are `baseline`, `seriess`, `seriessrt`, `seriessrtbest`). Not
+  measured on the title yet; a measurement with it must say "ray tracing off".
 - Copy-back noting (since `bb57383`, default on): pages a copy-back wrote
   whole are no longer copied back into the same copy at the next refresh.
   `VICTORY_BACK_NOTE=0` turns it off.
@@ -125,12 +136,20 @@ again that way).
 | On the GPU (fence wait), ms | 263.7 | 211.5 |
 | GPU timestamps: the title's work, ms | 224.0 | 186.3 |
 | Copying back, ms (MB) | 286.3 (45.7) | 237.9 (64.9) |
-| Draws per frame; dropped without a pipeline | 3,063; 778 | 1,649; 246 |
+| Draws per frame; draws and dispatches not run | 3,063; 778 | 1,649; 246 |
+| Of those, by reason (means; read again 2026-11-28) | ray-tracing builder (off) 943.6, no host pipeline 3.9, not prepared 1.8 | ray-tracing builder (off) 403.0, no host pipeline 3.9, not prepared 0.8 |
+| Host pipelines made / loaded from the library | 670 / 1,120 | 151 / 1,811 |
 | Process cores busy | 1.23 | 1.09 |
 | VRAM used of budget, GiB | 5.50 of 6.23 | 5.53 of 6.34 |
 | Textures in the PC's memory for lack of room on the card | 16,539 (6,269 MiB) | 14,280 (4,917 MiB) |
 | Errors / device removed / panics | 0 / 0 / 0 | 0 / 0 / 0 |
 
+- Until 2026-11-28 the frame line called every draw or dispatch not run
+  "dropped without a host pipeline". Read again by reason on 2026-11-28
+  (`ab.ps1 -ParseOnly`, the runner's own counters), nearly all of them were
+  dispatches of the ray-tracing structure builder, which is off by default
+  and whose structures nothing uses; about 4 draws a frame had no host
+  pipeline. The frame line now says "not run", and `ab.bat` lists the reasons.
 - The runner's session averages for these runs (11.54 and 7.48 FPS) count
   the menus at ~30 FPS as well; they are **not** gameplay figures.
 - `VICTORY_HOT_WINDOWS_MB=1024` and the card-buffer switches were also
@@ -141,8 +160,12 @@ again that way).
 - The stability run before them (`best`: card buffers from 1 MiB, hot
   copies 1024 MB, texture copies from host copies; fallback on) had 25
   gameplay frame lines at a median of 5,483.2 ms/frame (0.20 FPS), with the
-  process keeping 7.25 cores busy and 1,443 draws per frame dropped while
-  their pipelines were made; preparing (176.2 ms), the GPU (162.2 ms) and
+  process keeping 7.25 cores busy and 1,443 draws and dispatches per frame
+  not run (read again by reason on 2026-11-28: 1,069.5 of the switched-off
+  ray-tracing builder, 272.9 without a host pipeline and 206.2 not prepared,
+  while 1,070 host pipelines were made in the run and 49 loaded from the
+  library);
+  preparing (176.2 ms), the GPU (162.2 ms) and
   copying back (70.7 ms) add up to a small part of that frame.
 - Compared with the 2026-11-26 gameplay figures (82.3 ms preparing, 86.6 ms
   on the GPU, 44.7 ms copying back), every part of the frame is several
@@ -385,6 +408,25 @@ Cycles 39 and 40, 2026-11-28 (night run):
   synthetic byte right, 8 of 8 pictures right, no cost changed by 10% or
   more against cycle 39. Defaults unchanged.
 
+Cycles 41 and 42, 2026-11-28 (interactive session):
+
+- `9f16e6d`: `VICTORY_RT_MISS=1` (ray tracing off; see Settings). The
+  stand-in title has no ray tests, so it shows only that the switch
+  changes nothing else; the shader tests check the miss answers on the
+  card.
+- `08c0eb9` (runner): the frame line says "not run" for draws and
+  dispatches left out for any reason, and `ab.bat` lists the reasons;
+  `ab.bat`'s default runs are `baseline`, `seriess`, `seriessrt`,
+  `seriessrtbest`.
+- Cycle 41 (full, with both): all green, 677 tests passed, every
+  synthetic byte right, 9 of 9 pictures right (`rtmiss` among them), no
+  cost changed by 10% or more against cycle 40. Defaults unchanged.
+- `2c38d20`: comments no longer name code offsets, shader programs or
+  shader hashes of the test title. No code changed.
+- Cycle 42 (full): all green, 677 tests passed, every synthetic byte
+  right, 9 of 9 pictures right, no cost changed by 10% or more against
+  cycle 41.
+
 ## Where the frame time goes (2026-11-26, gameplay)
 
 Gameplay, measured by the maintainer from the runner's frame line on 2026-11-26:
@@ -445,6 +487,7 @@ Task Manager figures were not taken for this run.
 | 2026-11-28 | `d130c10` | stand-in title, 8 buffers rewritten whole, `texcopy` with `VICTORY_WATCHED_ALLOC=1`: write watch 0.35 -> 0.08 ms a frame and CPU preparing 3.3 -> 3.0 ms with `VICTORY_HOT_SKIP=1` (two runs); off by default; 676 tests passed, 10 of 10 pictures right | automated night run, on the stand-in title (no game) |
 | 2026-11-28 | `78458bc` | a flaky test fixed (`e576557`, a shared journal left entries from a freed block); the debugging aids no longer name title-specific code offsets; 676 tests passed, 8 of 8 pictures right, defaults unchanged | automated night run, on the stand-in title (no game) |
 | 2026-11-28 | `eb69c65` | `CONSOLE=series-s` runs without the FidelityFX SDK (bilinear upscale, `VICTORY_FFX_SIMPLE=1`); `ab.bat` configurations `seriess`, `seriessbest`; default profile unchanged (`series-x`); 676 tests passed, 8 of 8 pictures right | automated night run, on the stand-in title (no game); the profile's speed on the test title not measured |
+| 2026-11-28 | `9f16e6d` | `VICTORY_RT_MISS=1` / `RT_MISS=1`: ray tracing off (every ray test answers a miss), off by default; `ab.bat` runs `baseline`, `seriess`, `seriessrt`, `seriessrtbest` by default and lists draws not run by reason; the 27 Nov "dropped without a pipeline" counts were nearly all the switched-off ray-tracing builder; cycles 41 and 42 all green, 677 tests passed, 9 of 9 pictures right | automated, on the stand-in title (no game); not measured on the test title |
 | 2026-11-27 | `e847242` | texture fallback off by default again; the PC's memory on the frame line; `ab.bat` counts gameplay frame lines only | not measured on the title yet |
 | 2026-11-27 | `b5efb43` | stability run (`best` switches): ended by itself after a session of about 6 min (exit code 1), gameplay ~0.2 FPS | from the runner's lines; no error, device removal or panic logged; seen as a crash by the maintainer |
 | 2026-11-27 | `b5efb43` | gameplay ~0.7 FPS (median 1,438.3 ms/frame) with the defaults (fallback on); ~0.9 FPS (1,076.4 ms/frame) with `VICTORY_TEXTURE_FROM_COPY=1` | measured by the maintainer with `ab.bat` (gameplay frame lines only, from 120 s on, one run each); slower than 2026-11-26; no errors, device removals or panics; sometimes missing textures (user-reported) |
