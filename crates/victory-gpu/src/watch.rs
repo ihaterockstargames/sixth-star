@@ -46,6 +46,100 @@ struct Journal {
     /// other ahead asking is made, and `ahead` stays, until
     /// [`ask_once_end`].
     kept: bool,
+    /// Ranges (pages `[first, last)`) found wholly written in askings in a
+    /// row, with `VICTORY_HOT_SKIP=1` ([`Hot`]).
+    hot: BTreeMap<(usize, usize), Hot>,
+}
+
+/// A range the title rewrites whole ([`Journal::hot`]). Asking the kernel
+/// about it, and resetting its pages, buys nothing: every page is copied
+/// anyway. So it is answered "all written" for [`HOT_SKIPS`] askings
+/// without the kernel, then asked again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hot {
+    /// Found wholly written at this asking; once more in a row and it is
+    /// skipped.
+    Warm(u64),
+    /// Answered without the kernel this many more times.
+    Skip(u32),
+    /// The skips are over; the kernel asking at this number took the
+    /// writes of all of them, so it says nothing about one frame. The
+    /// next asking decides.
+    Probe(u64),
+}
+
+/// Askings of a hot range answered without the kernel before it is asked
+/// again.
+const HOT_SKIPS: u32 = 8;
+/// More hot ranges than this and they are all forgotten (they are only a
+/// shortcut).
+const HOT_MAX: usize = 4096;
+
+/// Whether ranges found wholly written askings in a row skip the kernel
+/// (`VICTORY_HOT_SKIP=1`; off by default).
+///
+/// The answer is a superset of the truth: every page of the range counts
+/// as written at a new asking, which other copies of the same memory see
+/// too. When the skips are over the kernel's answer holds every write
+/// since the last reset, so it is not judged; the asking after it is.
+pub(crate) fn hot_skip() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_HOT_SKIP").is_some_and(|v| v == "1"))
+}
+
+/// What becomes of a range's [`Hot`] state after an asking numbered `now`
+/// that found it wholly written (`whole`) or not.
+fn next_hot(state: Option<Hot>, whole: bool, now: u64) -> Option<Hot> {
+    match state {
+        // Answered without the kernel; `writes` does not judge those.
+        Some(Hot::Skip(n)) if n > 0 => Some(Hot::Skip(n)),
+        Some(Hot::Skip(_)) => Some(Hot::Probe(now)),
+        // The same asking, seen by another copy: nothing new.
+        Some(Hot::Probe(at)) | Some(Hot::Warm(at)) if at == now => state,
+        Some(Hot::Probe(_)) | Some(Hot::Warm(_)) => whole.then_some(Hot::Skip(HOT_SKIPS)),
+        None => whole.then_some(Hot::Warm(now)),
+    }
+}
+
+/// Whether `[first, last)` is answered without the kernel at its next
+/// asking (so an asking ahead leaves it out).
+fn hot_skipping(j: &Journal, first: usize, last: usize) -> bool {
+    matches!(j.hot.get(&(first, last)), Some(Hot::Skip(n)) if *n > 0)
+}
+
+/// The answer for a range being skipped ([`Hot::Skip`]): all its pages
+/// written at a new asking.
+fn hot_answer(j: &mut Journal, first: usize, last: usize) -> Option<(u64, Vec<(usize, u64)>)> {
+    let Some(Hot::Skip(n)) = j.hot.get_mut(&(first, last)) else {
+        return None;
+    };
+    if *n == 0 {
+        return None;
+    }
+    *n -= 1;
+    j.asked += 1;
+    let now = j.asked;
+    for page in first..last {
+        j.written.insert(page, now);
+    }
+    Some((now, (first..last).map(|page| (page, now)).collect()))
+}
+
+/// Notes what the asking `now` said of `[first, last)` ([`next_hot`]).
+fn judge(j: &mut Journal, first: usize, last: usize, now: u64, written: &[(usize, u64)]) {
+    let whole = written.len() == last - first && written.iter().all(|&(_, w)| w == now);
+    let state = j.hot.get(&(first, last)).copied();
+    match next_hot(state, whole, now) {
+        Some(next) => {
+            if state.is_none() && j.hot.len() >= HOT_MAX {
+                j.hot.clear();
+            }
+            j.hot.insert((first, last), next);
+        }
+        None => {
+            j.hot.remove(&(first, last));
+        }
+    }
 }
 
 static JOURNAL: Mutex<Journal> = Mutex::new(Journal {
@@ -55,6 +149,7 @@ static JOURNAL: Mutex<Journal> = Mutex::new(Journal {
     ahead: Vec::new(),
     ahead_asked: 0,
     kept: false,
+    hot: BTreeMap::new(),
 });
 
 /// Ranges of one submission closer than this are asked about together:
@@ -88,6 +183,13 @@ pub(crate) fn ask_ahead(ranges: &[(usize, usize)]) {
     // hold is left to `writes`.
     if j.kept {
         return;
+    }
+    // Hot ranges are answered by `writes` without the kernel.
+    if !j.hot.is_empty() {
+        pieces.retain(|&(a, b)| !hot_skipping(j, a, b));
+        if pieces.len() < 2 {
+            return;
+        }
     }
     j.asked += 1;
     j.ahead_asked = j.asked;
@@ -193,7 +295,10 @@ pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
             continue;
         }
         let (first, last) = (start / PAGE, end.div_ceil(PAGE));
-        if !j.ahead.iter().any(|&(a, b)| a <= first && last <= b) && ask_kernel(j, first, last) {
+        if !hot_skipping(j, first, last)
+            && !j.ahead.iter().any(|&(a, b)| a <= first && last <= b)
+            && ask_kernel(j, first, last)
+        {
             j.ahead.push((first, last));
         }
     }
@@ -303,21 +408,29 @@ pub(crate) fn asked(start: usize, end: usize) -> Option<(u64, Vec<(usize, u64)>)
 /// kernel just reported. `None` if the memory is not write-watched (nor,
 /// with `guarded`, view memory, which is then guarded).
 pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Vec<(usize, u64)>)> {
+    writes_with(start, end, guarded, hot_skip())
+}
+
+/// [`writes`], with ranges found wholly written skipping the kernel or not
+/// ([`hot_skip`]).
+fn writes_with(start: usize, end: usize, guarded: bool, hot: bool) -> Option<(u64, Vec<(usize, u64)>)> {
     let _cpu = crate::cpuprof::timed(crate::cpuprof::Work::WriteWatch);
     use windows_sys::Win32::System::Memory::GetWriteWatch;
     const WRITE_WATCH_FLAG_RESET: u32 = 1;
     let (first, last) = (start / PAGE, end.div_ceil(PAGE));
     let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
     let j = &mut *j;
+    if let Some(answer) = hot_answer(j, first, last) {
+        return Some(answer);
+    }
     // Asked ahead with the submission's other ranges: the journal has it.
     if j.ahead.iter().any(|&(a, b)| a <= first && last <= b) {
-        return Some((
-            j.ahead_asked,
-            j.written
-                .range(first..last)
-                .map(|(&p, &w)| (p, w))
-                .collect(),
-        ));
+        let now = j.ahead_asked;
+        let written: Vec<(usize, u64)> = j.written.range(first..last).map(|(&p, &w)| (p, w)).collect();
+        if hot {
+            judge(j, first, last, now, &written);
+        }
+        return Some((now, written));
     }
     let mut count = (last - first) * PAGE / KERNEL_PAGE;
     j.found.resize(count.max(j.found.len()), 0);
@@ -356,19 +469,20 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
         add(C::WatchUs, started.elapsed().as_micros() as u64);
         slow(started.elapsed().as_micros() as u64);
     }
+    let viewed = !guarded.is_empty() || failed;
     j.asked += 1;
     let now = j.asked;
     let pages = j.found[..count].iter().map(|&at| at / PAGE).chain(guarded);
     for page in pages.collect::<Vec<_>>() {
         j.written.insert(page, now);
     }
-    Some((
-        now,
-        j.written
-            .range(first..last)
-            .map(|(&p, &w)| (p, w))
-            .collect(),
-    ))
+    let written: Vec<(usize, u64)> = j.written.range(first..last).map(|(&p, &w)| (p, w)).collect();
+    // Only write-watched memory: guarded view blocks are guarded again by
+    // the asking, which a skip would leave open.
+    if hot && !viewed {
+        judge(j, first, last, now, &written);
+    }
+    Some((now, written))
 }
 
 /// Guarded blocks of view memory.
@@ -908,6 +1022,78 @@ mod tests {
             )
             .is_none()
         );
+        // SAFETY: our allocation.
+        unsafe { VirtualFree(p as *mut _, 0, MEM_RELEASE) };
+    }
+
+    #[test]
+    fn hot_states_follow_whole_writes() {
+        // Wholly written twice in a row: skipped.
+        assert_eq!(next_hot(None, true, 5), Some(Hot::Warm(5)));
+        assert_eq!(next_hot(None, false, 5), None);
+        assert_eq!(next_hot(Some(Hot::Warm(5)), true, 5), Some(Hot::Warm(5)));
+        assert_eq!(next_hot(Some(Hot::Warm(5)), true, 6), Some(Hot::Skip(HOT_SKIPS)));
+        assert_eq!(next_hot(Some(Hot::Warm(5)), false, 6), None);
+        // After the skips, the first kernel answer holds them all: not judged.
+        assert_eq!(next_hot(Some(Hot::Skip(0)), true, 9), Some(Hot::Probe(9)));
+        assert_eq!(next_hot(Some(Hot::Skip(0)), false, 9), Some(Hot::Probe(9)));
+        assert_eq!(next_hot(Some(Hot::Probe(9)), true, 9), Some(Hot::Probe(9)));
+        assert_eq!(next_hot(Some(Hot::Probe(9)), true, 10), Some(Hot::Skip(HOT_SKIPS)));
+        assert_eq!(next_hot(Some(Hot::Probe(9)), false, 10), None);
+    }
+
+    #[test]
+    fn a_range_written_whole_skips_the_kernel_and_is_asked_again() {
+        // SAFETY: a fresh write-watched allocation, freed at the end.
+        let p = unsafe {
+            VirtualAlloc(
+                std::ptr::null(),
+                4 * PAGE,
+                MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH,
+                PAGE_READWRITE,
+            )
+        } as usize;
+        assert_ne!(p, 0);
+        let (start, end) = (p, p + 4 * PAGE);
+        let first = p / PAGE;
+        let all = |now| (first..first + 4).map(|page| (page, now)).collect::<Vec<_>>();
+        let write_all = || {
+            for k in 0..4 * PAGE / KERNEL_PAGE {
+                // SAFETY: committed pages of ours.
+                unsafe { ((p + k * KERNEL_PAGE) as *mut u8).write(1) };
+            }
+        };
+        let _ = writes_with(start, end, false, true);
+        // Twice in a row whole: the next askings skip the kernel.
+        write_all();
+        let (now, written) = writes_with(start, end, false, true).expect("watched");
+        assert_eq!(written, all(now));
+        write_all();
+        let (now, written) = writes_with(start, end, false, true).expect("watched");
+        assert_eq!(written, all(now));
+        // Nothing written now, and still all of it reported (a superset):
+        // the kernel is not asked, so its bits stay.
+        // SAFETY: committed pages of ours.
+        unsafe { ((p + PAGE + 8) as *mut u8).write(2) };
+        for _ in 0..HOT_SKIPS {
+            let (now, written) = writes_with(start, end, false, true).expect("watched");
+            assert_eq!(written, all(now));
+        }
+        // The skips are over: the kernel holds the write made during them.
+        let (now, written) = writes_with(start, end, false, true).expect("watched");
+        assert!(written.contains(&(first + 1, now)));
+        assert!(!written.contains(&(first, now)));
+        // Then one page only: no longer hot, each asking says what it found.
+        unsafe { ((p + 2 * PAGE) as *mut u8).write(3) };
+        let (now, written) = writes_with(start, end, false, true).expect("watched");
+        assert!(written.contains(&(first + 2, now)));
+        assert!(!written.contains(&(first + 1, now)));
+        let (now, written) = writes_with(start, end, false, true).expect("watched");
+        assert!(written.iter().all(|&(_, w)| w < now));
+        {
+            let j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(!j.hot.contains_key(&(first, first + 4)));
+        }
         // SAFETY: our allocation.
         unsafe { VirtualFree(p as *mut _, 0, MEM_RELEASE) };
     }

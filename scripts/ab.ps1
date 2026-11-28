@@ -34,6 +34,8 @@
 #                  write-watched; stand-in title, 2026-11-28: 10% of each buffer
 #                  rewritten 2.5 -> 0.3 ms CPU preparing, whole buffers 2.6 -> 3.2)
 #   texwatched     texcopy with VICTORY_WATCHED_ALLOC=1
+#   texhot         texwatched with VICTORY_HOT_SKIP=1 (buffers found wholly written
+#                  twice in a row skip the write-watch asking for 8 askings)
 #   wide          VICTORY_WIDE_REFRESH=1 (refreshes on several threads)
 #   fills          VICTORY_WIDE_FILLS=1 (a list's fills on several threads; the default
 #                  since 2026-11-27)
@@ -113,6 +115,7 @@ function Get-Overrides([string]$name) {
         '^bestplain$' { return [ordered]@{ VICTORY_CARD_BUFFERS_MIN_MB = '1'; VICTORY_CARD_BUFFERS_MB = '1024'; VICTORY_HOT_WINDOWS_MB = '1024'; VICTORY_TEXTURE_FROM_COPY = '1'; VICTORY_PLAIN_COPY = '1' } }
         '^watched$' { return [ordered]@{ VICTORY_WATCHED_ALLOC = '1' } }
         '^texwatched$' { return [ordered]@{ VICTORY_TEXTURE_FROM_COPY = '1'; VICTORY_WATCHED_ALLOC = '1' } }
+        '^texhot$' { return [ordered]@{ VICTORY_TEXTURE_FROM_COPY = '1'; VICTORY_WATCHED_ALLOC = '1'; VICTORY_HOT_SKIP = '1' } }
         '^wide$' { return [ordered]@{ VICTORY_WIDE_REFRESH = '1' } }
         '^fills$' { return [ordered]@{ VICTORY_WIDE_FILLS = '1' } }
         '^nofills$' { return [ordered]@{ VICTORY_WIDE_FILLS = '0' } }
