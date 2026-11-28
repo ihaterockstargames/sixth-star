@@ -8,7 +8,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::alloc::{Layout, alloc, dealloc};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
@@ -340,6 +340,66 @@ const ALLOC_32BIT: u64 = 1 << 33;
 /// pointer handed out.
 const HEADER: usize = 2 * size_of::<usize>();
 
+/// With `VICTORY_WATCHED_ALLOC=1`, blocks of [`XMemAllocDefault`] of at
+/// least this size, at an alignment of at most this, are a write-watched
+/// reservation of their own instead of host heap memory: the GPU side then
+/// copies only the pages the title wrote since its last copy (decision
+/// 0007), where heap memory is copied whole at every refresh (a committed
+/// buffer's memory comes from here unless the title hooks the allocator).
+///
+/// Off by default, on the stand-in title's measurements (2026-11-28, 8
+/// buffers of 3 MB, texture copies from buffers): with 10% of each buffer
+/// rewritten a frame, CPU preparing 2.5 -> 0.3 ms and 24.6 -> 2.6 MB
+/// copied; with whole buffers rewritten, CPU preparing 2.6 -> 3.2 ms (the
+/// write watch asked 13 times a frame instead of 5) and the title's own
+/// frame 10.8 -> 15.6 ms (its writes after each reset of the watch cost
+/// more). A default needs the runtime to stop asking for buffers it keeps
+/// finding wholly written.
+const WATCHED_MIN: usize = 64 << 10;
+
+/// The blocks [`XMemAllocDefault`] reserved on their own ([`WATCHED_MIN`]).
+static WATCHED: LazyLock<Mutex<HashSet<usize>>> = LazyLock::new(Default::default);
+
+fn watched() -> MutexGuard<'static, HashSet<usize>> {
+    WATCHED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether large default blocks are write-watched reservations
+/// ([`WATCHED_MIN`]): only with `VICTORY_WATCHED_ALLOC=1`.
+fn watched_alloc() -> bool {
+    static ON: LazyLock<bool> =
+        LazyLock::new(|| watched_switch(std::env::var_os("VICTORY_WATCHED_ALLOC").as_deref()));
+    *ON
+}
+
+/// `VICTORY_WATCHED_ALLOC`'s value: only `1` turns it on.
+fn watched_switch(value: Option<&std::ffi::OsStr>) -> bool {
+    value.and_then(|v| v.to_str()) == Some("1")
+}
+
+/// A write-watched reservation for a default block, if it is one
+/// ([`WATCHED_MIN`]); null if not, or if the host has no room.
+fn watched_block(size: usize, attributes: u64) -> *mut c_void {
+    let align = 1usize << (attributes >> ALIGNMENT_SHIFT & 0x1f);
+    if size < WATCHED_MIN || align > WATCHED_MIN {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: a plain reservation of our own, at an address of the host's
+    // choice (64 KiB aligned); its pages start zeroed.
+    let at = unsafe {
+        VirtualAlloc(
+            std::ptr::null(),
+            size,
+            MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH,
+            PAGE_READWRITE,
+        )
+    };
+    if !at.is_null() {
+        watched().insert(at as usize);
+    }
+    at
+}
+
 fn layout(size: usize, attributes: u64) -> Option<Layout> {
     // An alignment of at least 16 leaves room for the header.
     let align = 1usize << (attributes >> ALIGNMENT_SHIFT & 0x1f).max(4);
@@ -416,6 +476,12 @@ pub extern "system" fn XMemAllocDefault(size: usize, attributes: u64) -> *mut c_
             PAGE_READWRITE,
         );
     }
+    if watched_alloc() {
+        let block = watched_block(size, attributes);
+        if !block.is_null() {
+            return block;
+        }
+    }
     let Some(layout) = layout(size, attributes) else {
         return std::ptr::null_mut();
     };
@@ -442,6 +508,11 @@ pub extern "system" fn XMemAllocDefault(size: usize, attributes: u64) -> *mut c_
 /// Frees what [`XMemAllocDefault`] returned, given the same attributes.
 pub extern "system" fn XMemFreeDefault(address: *mut c_void, attributes: u64) {
     if address.is_null() {
+        return;
+    }
+    if watched().remove(&(address as usize)) {
+        // SAFETY: a whole reservation of `watched_block`, freed once.
+        unsafe { VirtualFree(address, 0, MEM_RELEASE) };
         return;
     }
     // SAFETY: the address came from `XMemAlloc` with these attributes: a
@@ -1592,5 +1663,51 @@ mod tests {
         assert!(page_window(&[a[0], b[0]], 0, PAGE).is_some());
         assert_eq!(XMemFreePhysicalPages(3, a.as_ptr()), 1);
         assert_eq!(XMemFreePhysicalPages(1, b.as_ptr()), 1);
+    }
+
+    /// The pages of `[at, at + len)` written since the last asking, or
+    /// `None` if the range is not write-watched.
+    fn written(at: *mut c_void, len: usize) -> Option<usize> {
+        use windows_sys::Win32::System::Memory::GetWriteWatch;
+        let mut found = vec![std::ptr::null_mut::<c_void>(); len / 4096 + 1];
+        let (mut count, mut granularity) = (found.len(), 0);
+        // SAFETY: the answer buffer holds `count` entries.
+        let failed =
+            unsafe { GetWriteWatch(1, at, len, found.as_mut_ptr(), &mut count, &mut granularity) };
+        (failed == 0).then_some(count)
+    }
+
+    #[test]
+    fn large_default_blocks_are_write_watched() {
+        // Only `1` turns it on.
+        assert!(!watched_switch(None));
+        assert!(!watched_switch(Some("0".as_ref())));
+        assert!(watched_switch(Some("1".as_ref())));
+        let size = 3 * MIB;
+        let at = watched_block(size, 0);
+        assert!(!at.is_null());
+        // Zeroed, watched, and only the pages written are reported.
+        assert!(written(at, size).is_some(), "a large block is watched");
+        // SAFETY: the block holds `size` bytes.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(at.cast::<u8>(), size) };
+        assert!(bytes.iter().all(|&b| b == 0));
+        // The first touch of a demand-zero page counts as a write; after
+        // that only real writes do.
+        assert!(written(at, size).is_some());
+        assert_eq!(written(at, size), Some(0));
+        bytes[5] = 1;
+        bytes[2 * MIB] = 1;
+        assert_eq!(written(at, size), Some(2));
+        XMemFreeDefault(at, 0);
+        assert!(!watched().contains(&(at as usize)));
+
+        // Small blocks and very aligned ones stay heap blocks.
+        assert!(watched_block(4096, 0).is_null());
+        let aligned_attributes = 20u64 << ALIGNMENT_SHIFT;
+        assert!(watched_block(size, aligned_attributes).is_null());
+        // Without the switch a large block is a heap block, not watched.
+        let heap = XMemAllocDefault(size, 0);
+        assert!(!heap.is_null() && written(heap, size).is_none());
+        XMemFreeDefault(heap, 0);
     }
 }
