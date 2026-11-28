@@ -370,6 +370,21 @@ Cycles 37 and 38, 2026-11-28 (night run):
   synthetic byte right, 8 of 8 pictures right, no cost changed by 10% or
   more against cycle 37. Defaults unchanged.
 
+Cycles 39 and 40, 2026-11-28 (night run):
+
+- Cycle 39 (full, `6fcf9c2`): all green, 676 tests passed, every
+  synthetic byte right, 8 of 8 pictures right.
+- `eb69c65` (launcher and runner): `CONSOLE=series-s` without the
+  FidelityFX SDK (`FFX_DIR` empty or not a folder) no longer falls back to
+  `series-x`; it runs the Series S profile with `VICTORY_FFX_SIMPLE=1`, a
+  bilinear upscale instead of FSR, and says so. `ab.bat` gained the
+  configurations `seriess` and `seriessbest`. The default profile stays
+  `series-x`. The stand-in title cannot show the profile's effect, so its
+  speed on the test title is not measured.
+- Cycle 40 (full, with the change): all green, 676 tests passed, every
+  synthetic byte right, 8 of 8 pictures right, no cost changed by 10% or
+  more against cycle 39. Defaults unchanged.
+
 ## Where the frame time goes (2026-11-26, gameplay)
 
 Gameplay, measured by the maintainer from the runner's frame line on 2026-11-26:
@@ -429,6 +444,7 @@ Task Manager figures were not taken for this run.
 | 2026-11-28 | `51cab58` | stand-in title, 8 buffers, 10% rewritten: `texcopy` CPU preparing 2.5 -> 0.3 ms and 24.6 -> 2.6 MB copied a frame with `VICTORY_WATCHED_ALLOC=1` (two runs); whole buffers 2.6 -> 3.2 ms, so off by default; 674 tests passed, 9 of 9 pictures right | automated night run, on the stand-in title (no game) |
 | 2026-11-28 | `d130c10` | stand-in title, 8 buffers rewritten whole, `texcopy` with `VICTORY_WATCHED_ALLOC=1`: write watch 0.35 -> 0.08 ms a frame and CPU preparing 3.3 -> 3.0 ms with `VICTORY_HOT_SKIP=1` (two runs); off by default; 676 tests passed, 10 of 10 pictures right | automated night run, on the stand-in title (no game) |
 | 2026-11-28 | `78458bc` | a flaky test fixed (`e576557`, a shared journal left entries from a freed block); the debugging aids no longer name title-specific code offsets; 676 tests passed, 8 of 8 pictures right, defaults unchanged | automated night run, on the stand-in title (no game) |
+| 2026-11-28 | `eb69c65` | `CONSOLE=series-s` runs without the FidelityFX SDK (bilinear upscale, `VICTORY_FFX_SIMPLE=1`); `ab.bat` configurations `seriess`, `seriessbest`; default profile unchanged (`series-x`); 676 tests passed, 8 of 8 pictures right | automated night run, on the stand-in title (no game); the profile's speed on the test title not measured |
 | 2026-11-27 | `e847242` | texture fallback off by default again; the PC's memory on the frame line; `ab.bat` counts gameplay frame lines only | not measured on the title yet |
 | 2026-11-27 | `b5efb43` | stability run (`best` switches): ended by itself after a session of about 6 min (exit code 1), gameplay ~0.2 FPS | from the runner's lines; no error, device removal or panic logged; seen as a crash by the maintainer |
 | 2026-11-27 | `b5efb43` | gameplay ~0.7 FPS (median 1,438.3 ms/frame) with the defaults (fallback on); ~0.9 FPS (1,076.4 ms/frame) with `VICTORY_TEXTURE_FROM_COPY=1` | measured by the maintainer with `ab.bat` (gameplay frame lines only, from 120 s on, one run each); slower than 2026-11-26; no errors, device removals or panics; sometimes missing textures (user-reported) |
